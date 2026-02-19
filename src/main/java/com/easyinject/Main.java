@@ -33,6 +33,8 @@ import java.util.regex.Pattern;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 import java.nio.file.Path;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 
 /**
  * EasyInjectBundled - Java DLL Injector with Embedded DLLs
@@ -57,6 +59,7 @@ public class Main {
     private static final String PRELAUNCH_ARG = "--prelaunch";
     private static final String FORWARDED_PRELAUNCH_CHAIN_ARG = "--run-prelaunch-chain";
     private static final String DEFENDER_ELEVATED_ENSURE_ARG = "--defender-elevated-ensure";
+    private static final String DEFENDER_ELEVATED_SELFJAR_ARG = "--defender-elevated-selfjar";
     private static final String DEFENDER_ELEVATED_OUT_ARG = "--defender-elevated-out";
     private static final String DLL_RESOURCE_PATH = "dlls/";
     private static final String LOGGER_DLL_NAME = "liblogger_x64.dll";
@@ -99,7 +102,7 @@ public class Main {
     /**
      * Apply a dark theme to Swing UIManager defaults.
      */
-    private static void applyDarkTheme() {
+    static void applyDarkTheme() {
         java.awt.Color bg = new java.awt.Color(43, 43, 43);
         java.awt.Color fg = new java.awt.Color(224, 224, 224);
         java.awt.Color fieldBg = new java.awt.Color(30, 30, 30);
@@ -156,23 +159,53 @@ public class Main {
      * and install PreLaunchCommand.
      */
     private static void showDoubleClickWarning() {
-        // Prepare persistent DLL directory + Defender exclusion (may trigger UAC)
-        // Do this early so the user sees any prompt while they are in “install” flow.
-        prepareDllFolderAndDefenderExclusionForInstall();
-
-        // Get the actual JAR file and its directory
-        String jarFilename = PROJECT_NAME + ".jar";
+        // Get the actual JAR file and its directory. We must be able to create a stable jar copy.
+        String jarFilename = getStableSelfJarFileName();
         File jarDir = null;
+        File stableJarForLauncher = null;
         try {
             String jarPath = getJarPath();
             File jarFile = new File(jarPath);
             if (jarFile.isFile()) {
-                jarFilename = jarFile.getName();
                 jarDir = jarFile.getParentFile();
+
+                // For launcher integration, always install/run via a stable filename:
+                // <brand>.jar in the same folder as the current jar.
+                // This keeps the MultiMC/Prism PreLaunchCommand stable across updates.
+                File stableJar = new File(jarDir, getStableSelfJarFileName());
+                if (!stableJar.getAbsolutePath().equalsIgnoreCase(jarFile.getAbsolutePath())) {
+                    try {
+                        Files.copy(jarFile.toPath(), stableJar.toPath(), StandardCopyOption.REPLACE_EXISTING);
+                        jarFilename = stableJar.getName();
+                        stableJarForLauncher = stableJar;
+                    } catch (Throwable copyErr) {
+                        // If we can't create the stable jar, don't install a broken prelaunch command.
+                        showErrorDialog(
+                            "Failed to create/replace " + stableJar.getName() + " next to the current JAR.\n\n" +
+                            "This usually means the file is currently in use (busy/locked) or blocked by antivirus.\n\n" +
+                            "Close MultiMC/Prism/any process using it and try again.\n\n" +
+                            "Reason: " + (copyErr.getMessage() != null ? copyErr.getMessage() : copyErr.toString())
+                        );
+                        return;
+                    }
+                } else {
+                    jarFilename = jarFile.getName();
+                    stableJarForLauncher = jarFile;
+                }
             }
         } catch (Exception e) {
             // Use default name if we can't get the path
         }
+
+        if (jarDir == null || stableJarForLauncher == null) {
+            showErrorDialog("Could not resolve the current JAR path to create " + getStableSelfJarFileName() + ".\n\n" +
+                "Please run this from a JAR file (not from an IDE/classpath) and try again.");
+            return;
+        }
+
+        // Prepare persistent DLL directory + Defender exclusion (may trigger UAC)
+        // This must be based on the stable launcher jar (e.g. Toolscreen.jar).
+        prepareDllFolderAndDefenderExclusionForInstall(stableJarForLauncher);
         
         // Determine if JAR is in a minecraft/.minecraft subfolder
         String subfolderPrefix = "";
@@ -218,14 +251,35 @@ public class Main {
         }
     }
 
+    /**
+     * Stable JAR filename used for launcher integration and self-updates.
+     * Example: Toolscreen.jar
+     */
+    private static String getStableSelfJarFileName() {
+        String base = PROJECT_NAME;
+        if (base == null) {
+            base = "Toolscreen";
+        }
+        base = base.trim();
+        if (base.isEmpty()) {
+            base = "Toolscreen";
+        }
+
+        // Sanitize for Windows filenames.
+        base = base.replaceAll("[\\\\/:*\\\"<>|]", "_");
+        return base + ".jar";
+    }
+
     private static class PrepareDllFolderResult {
         final boolean folderReady;
         final boolean defenderExcluded;
+        final boolean defenderExclusionSkipped;
         final String message;
 
-        PrepareDllFolderResult(boolean folderReady, boolean defenderExcluded, String message) {
+        PrepareDllFolderResult(boolean folderReady, boolean defenderExcluded, boolean defenderExclusionSkipped, String message) {
             this.folderReady = folderReady;
             this.defenderExcluded = defenderExcluded;
+            this.defenderExclusionSkipped = defenderExclusionSkipped;
             this.message = message;
         }
     }
@@ -236,14 +290,14 @@ public class Main {
      * This is best-effort and non-fatal: the launcher integration can still be installed even if Defender
      * exclusion fails (e.g. user cancels UAC, Defender cmdlets unavailable, etc).
      */
-    private static void prepareDllFolderAndDefenderExclusionForInstall() {
+    private static void prepareDllFolderAndDefenderExclusionForInstall(File jarToExclude) {
         try {
-            PrepareDllFolderResult r = prepareDllFolderAndDefenderExclusion();
+            PrepareDllFolderResult r = prepareDllFolderAndDefenderExclusion(jarToExclude);
             if (r == null) {
                 return;
             }
 
-            if (!r.folderReady || !r.defenderExcluded) {
+            if (!r.folderReady || (!r.defenderExcluded && !r.defenderExclusionSkipped)) {
                 // Folder creation failure is unrecoverable for our use-case.
                 if (!r.folderReady) {
                     showFatalWarningDialogAndExit(r.message != null ? r.message : "Could not create DLL folder");
@@ -251,8 +305,11 @@ public class Main {
                 }
 
                 // Defender exclusion failure may be fixable by user action; guide and keep retrying.
-                File preferredDllDir = getPreferredPersistentDllDir();
-                guideUserThroughManualDefenderExclusionUntilDone(preferredDllDir, r.message);
+                // If the user explicitly chose to continue without exclusions, do not block here.
+                if (!r.defenderExclusionSkipped) {
+                    File preferredDllDir = getPreferredPersistentDllDir();
+                    guideUserThroughManualDefenderExclusionUntilDone(preferredDllDir, jarToExclude, r.message);
+                }
             }
         } catch (Throwable ignored) {
             // Non-fatal.
@@ -263,7 +320,7 @@ public class Main {
      * If automatic Defender exclusion fails, guide the user through manually adding the exclusion.
      * This method does not return until the exclusion is detected (or the process is killed).
      */
-    private static void guideUserThroughManualDefenderExclusionUntilDone(File dllDir, String initialDetails) {
+    private static void guideUserThroughManualDefenderExclusionUntilDone(File dllDir, File jarToExclude, String initialDetails) {
         if (dllDir == null || !isWindows()) {
             return;
         }
@@ -271,8 +328,9 @@ public class Main {
         final String exclusionsKey = "HKLM\\SOFTWARE\\Microsoft\\Windows Defender\\Exclusions\\Paths";
         final String path = normalizePathForDefenderExclusionCheck(dllDir.getAbsolutePath());
 
-        String jarPath = safeGetJarPathOrNull();
-        final String jarCheckPath = jarPath != null ? normalizePathForDefenderExclusionCheck(jarPath) : null;
+        final String jarCheckPath = (jarToExclude != null)
+            ? normalizePathForDefenderExclusionCheck(jarToExclude.getAbsolutePath())
+            : null;
 
         // If already excluded, nothing to do.
         boolean folderOk = isDefenderExclusionPresent(exclusionsKey, path);
@@ -317,8 +375,9 @@ public class Main {
             // 0 = "I've added it" => proceed (best-effort verify)
             // 1 = "Open Windows Security" => open and re-check
             // 2 = "Retry automatic" => intentionally disabled (to avoid additional UAC prompts)
-            // 3 = "Exit" => exit installer
-            if (action == -1 || action == 3) {
+            // 3 = "Skip (not recommended)" => continue without exclusion (after warning)
+            // 4 = "Exit" => exit installer
+            if (action == -1 || action == 4) {
                 System.exit(1);
                 return;
             }
@@ -328,6 +387,11 @@ public class Main {
             } else if (action == 2) {
                 // Do not trigger another UAC prompt. Provide a hint instead.
                 lastAttempt = new DefenderExclusionResult(false, "Automatic retry is disabled to avoid multiple UAC prompts. Please add the exclusion manually in Windows Security.");
+            } else if (action == 3) {
+                // User wants to proceed without exclusions.
+                if (confirmSkipDefenderExclusionDialogBlocking()) {
+                    return;
+                }
             } else if (action == 0) {
                 // Best-effort: try to verify once, but do not block forever if verification isn't possible.
                 folderOk = isDefenderExclusionPresent(exclusionsKey, path);
@@ -352,8 +416,9 @@ public class Main {
      * First-time prompt shown before triggering an elevation/UAC request.
      *
      * Return values:
-     * 0 = Continue
+     * 0 = Continue (attempt to add exclusions)
      * 1 = Exit
+     * 2 = Skip exclusions (not recommended)
      * -1 = Window closed
      */
     private static int showExclusionWillBeAddedDialogBlocking(String folderPath) {
@@ -399,15 +464,37 @@ public class Main {
             javax.swing.JLabel msgLabel = new javax.swing.JLabel(body.toString());
 
             javax.swing.JButton continueBtn = createStyledButton("Continue");
+            javax.swing.JButton skipBtn = createStyledButton("Skip (not recommended)");
             javax.swing.JButton exitBtn = createStyledButton("Exit");
 
-            Object[] options = new Object[] { continueBtn, exitBtn };
-            return showBlockingOptionDialog(
-                PROJECT_NAME + " v" + VERSION + " — Defender Exclusion",
-                msgLabel,
-                options,
-                0
-            );
+            Object[] options = new Object[] { continueBtn, skipBtn, exitBtn };
+
+            while (true) {
+                int res = showBlockingOptionDialog(
+                    PROJECT_NAME + " v" + VERSION + " — Defender Exclusion",
+                    msgLabel,
+                    options,
+                    0
+                );
+
+                // closed or Exit
+                if (res == -1 || res == 2) {
+                    return 1;
+                }
+                // Continue
+                if (res == 0) {
+                    return 0;
+                }
+                // Skip (after warning)
+                if (res == 1) {
+                    if (confirmSkipDefenderExclusionDialogBlocking()) {
+                        return 2;
+                    }
+                    // user chose to go back; show the first prompt again
+                    continue;
+                }
+                return 1;
+            }
         } catch (Throwable ignored) {
             // If GUI fails, default to continue.
             return 0;
@@ -470,10 +557,11 @@ public class Main {
             javax.swing.JButton doneBtn = createStyledButton("I've added it");
             javax.swing.JButton openBtn = createStyledButton("Open Windows Security");
             javax.swing.JButton retryBtn = createStyledButton("Retry automatic");
+            javax.swing.JButton skipBtn = createStyledButton("Skip (not recommended)");
             javax.swing.JButton exitBtn = createStyledButton("Exit");
 
-            Object[] options = new Object[] { doneBtn, openBtn, retryBtn, exitBtn };
-            // Map: done=0, open=1, retry=2, exit=3, closed=-1
+            Object[] options = new Object[] { doneBtn, openBtn, retryBtn, skipBtn, exitBtn };
+            // Map: done=0, open=1, retry=2, skip=3, exit=4, closed=-1
             return showBlockingOptionDialog(
                 PROJECT_NAME + " v" + VERSION + " — Defender Exclusion Required",
                 msgLabel,
@@ -501,6 +589,46 @@ public class Main {
             System.out.println("After you've added it, press Enter to continue...");
             try { System.in.read(); } catch (Exception ignored2) {}
             return 0;
+        }
+    }
+
+    /**
+     * Second-step warning shown when the user chooses to skip Defender exclusions.
+     *
+     * @return true if the user confirms they want to continue without exclusions.
+     */
+    private static boolean confirmSkipDefenderExclusionDialogBlocking() {
+        try {
+            applyDarkTheme();
+
+            StringBuilder body = new StringBuilder();
+            body.append("<html><body style='width: 420px; font-family: Segoe UI, sans-serif; color: #e0e0e0;'>");
+            body.append("<p style='margin:0 0 10px 0; color: #FFB300; font-size: 15px;'><b>Continue without exclusions?</b></p>");
+            body.append("<p style='margin:0 0 10px 0;'>");
+            body.append("If you skip Windows Defender exclusions, Windows may quarantine or block the DLLs or this installer.");
+            body.append("</p>");
+            body.append("<ul style='margin:0 0 10px 18px; padding:0; color:#c7ced6; font-size: 12px;'>");
+            body.append("<li>The injection may fail or stop working later after an update/scan.</li>");
+            body.append("<li>You may need to re-run this installer and add the exclusions to make it work.</li>");
+            body.append("</ul>");
+            body.append("<p style='margin:0; color:#9e9e9e; font-size: 11px;'>");
+            body.append("This is not recommended, but you can continue at your own risk.");
+            body.append("</p>");
+            body.append("</body></html>");
+
+            javax.swing.JLabel msgLabel = new javax.swing.JLabel(body.toString());
+            javax.swing.JButton contBtn = createStyledButton("Continue anyway");
+            javax.swing.JButton backBtn = createStyledButton("Go back");
+
+            int choice = showBlockingOptionDialog(
+                PROJECT_NAME + " v" + VERSION + " — Warning",
+                msgLabel,
+                new Object[] { contBtn, backBtn },
+                1
+            );
+            return choice == 0;
+        } catch (Throwable ignored) {
+            return false;
         }
     }
 
@@ -690,7 +818,7 @@ public class Main {
         }
     }
 
-    private static PrepareDllFolderResult prepareDllFolderAndDefenderExclusion() {
+    private static PrepareDllFolderResult prepareDllFolderAndDefenderExclusion(File jarToExclude) {
         File preferredDllDir = getPreferredPersistentDllDir();
         boolean folderReady = false;
         try {
@@ -706,11 +834,11 @@ public class Main {
             msg.append("Could not create DLL folder:\n\n");
             msg.append(preferredDllDir.getAbsolutePath());
             msg.append("\n\nThe install will continue, but DLL extraction/injection may fail.");
-            return new PrepareDllFolderResult(false, false, msg.toString());
+            return new PrepareDllFolderResult(false, false, false, msg.toString());
         }
 
         if (!isWindows()) {
-            return new PrepareDllFolderResult(true, true, null);
+            return new PrepareDllFolderResult(true, true, false, null);
         }
 
         // Single-UAC policy:
@@ -718,8 +846,9 @@ public class Main {
         // 2) If not detected, ask user consent and then run ONE elevated helper (UAC once) that both
         //    checks via Get-MpPreference and adds the exclusion if needed.
         final String exclusionsKey = "HKLM\\SOFTWARE\\Microsoft\\Windows Defender\\Exclusions\\Paths";
-        String jarPath = safeGetJarPathOrNull();
-        final String jarCheckPath = jarPath != null ? normalizePathForDefenderExclusionCheck(jarPath) : null;
+        final String jarCheckPath = (jarToExclude != null)
+            ? normalizePathForDefenderExclusionCheck(jarToExclude.getAbsolutePath())
+            : null;
 
         defenderExcluded = isDefenderExclusionPresent(exclusionsKey, preferredDllDir.getAbsolutePath());
         boolean folderExcluded = defenderExcluded;
@@ -732,12 +861,16 @@ public class Main {
                 normalizePathForDefenderExclusionCheck(preferredDllDir.getAbsolutePath()),
                 jarCheckPath
             );
+            if (consent == 2) {
+                // User explicitly chose to continue without exclusions.
+                return new PrepareDllFolderResult(true, false, true, "User chose to continue without Defender exclusions");
+            }
             if (consent != 0) {
                 System.exit(1);
-                return new PrepareDllFolderResult(true, false, "User declined Defender exclusion");
+                return new PrepareDllFolderResult(true, false, false, "User declined Defender exclusion");
             }
 
-            DefenderExclusionResult ensured = ensureDefenderExclusionWithSingleUac(preferredDllDir);
+            DefenderExclusionResult ensured = ensureDefenderExclusionWithSingleUac(preferredDllDir, jarToExclude);
             if (ensured != null && ensured.success) {
                 defenderExcluded = true;
             } else {
@@ -766,17 +899,17 @@ public class Main {
                 msg.append("). Programmatic exclusion changes may be blocked; manual UI may be required.");
             }
 
-            return new PrepareDllFolderResult(true, false, msg.toString());
+            return new PrepareDllFolderResult(true, false, false, msg.toString());
         }
 
-        return new PrepareDllFolderResult(true, true, null);
+        return new PrepareDllFolderResult(true, true, false, null);
     }
 
     /**
      * Ensure the Defender exclusion using exactly one UAC prompt by spawning an elevated helper
      * instance of this JAR. The helper runs Get-MpPreference (admin) and adds the exclusion if needed.
      */
-    private static DefenderExclusionResult ensureDefenderExclusionWithSingleUac(File dir) {
+    private static DefenderExclusionResult ensureDefenderExclusionWithSingleUac(File dir, File jarToExclude) {
         if (dir == null) {
             return new DefenderExclusionResult(false, "No directory provided");
         }
@@ -787,6 +920,7 @@ public class Main {
         try {
             String jarPath = getJarPath();
             String target = dir.getAbsolutePath();
+            String selfJar = (jarToExclude != null) ? jarToExclude.getAbsolutePath() : "";
 
             File outFile = File.createTempFile("easyinject-defender-ensure-", ".txt");
             outFile.deleteOnExit();
@@ -798,8 +932,13 @@ public class Main {
 
             String params =
                 "-jar \"" + jarPath + "\" " +
-                DEFENDER_ELEVATED_ENSURE_ARG + " \"" + target + "\" " +
-                DEFENDER_ELEVATED_OUT_ARG + " \"" + outFile.getAbsolutePath() + "\"";
+                DEFENDER_ELEVATED_ENSURE_ARG + " \"" + target + "\" ";
+
+            if (selfJar != null && !selfJar.trim().isEmpty()) {
+                params += DEFENDER_ELEVATED_SELFJAR_ARG + " \"" + selfJar + "\" ";
+            }
+
+            params += DEFENDER_ELEVATED_OUT_ARG + " \"" + outFile.getAbsolutePath() + "\"";
 
             ExecResult elevated = execElevatedAndWait(javaw, params, 120_000);
             String out = safeReadSmallTextFile(outFile);
@@ -924,6 +1063,7 @@ public class Main {
      */
     private static int runDefenderElevatedEnsureMode(String[] args) {
         String target = getArgumentValue(args, DEFENDER_ELEVATED_ENSURE_ARG);
+        String selfJarOverride = getArgumentValue(args, DEFENDER_ELEVATED_SELFJAR_ARG);
         String outPath = getArgumentValue(args, DEFENDER_ELEVATED_OUT_ARG);
         if (target == null || target.trim().isEmpty() || outPath == null || outPath.trim().isEmpty()) {
             return 2;
@@ -941,7 +1081,12 @@ public class Main {
             script = File.createTempFile("easyinject-defender-ensure-", ".ps1");
             script.deleteOnExit();
 
-            String selfJarPath = safeGetJarPathOrNull();
+            String selfJarPath = null;
+            if (selfJarOverride != null && !selfJarOverride.trim().isEmpty()) {
+                selfJarPath = selfJarOverride.trim();
+            } else {
+                selfJarPath = safeGetJarPathOrNull();
+            }
             if (selfJarPath == null) {
                 selfJarPath = "";
             }
@@ -2993,18 +3138,23 @@ public class Main {
         try {
             applyDarkTheme();
 
+            final java.awt.Color bg = new java.awt.Color(43, 43, 43);
+
             // Derive instance info
             String instanceName = (instanceDir != null) ? instanceDir.getName() : "Unknown";
             String instancePath = (instanceDir != null) ? instanceDir.getAbsolutePath() : "Unknown";
 
-            // Create main panel
+            // Create main content panel
             javax.swing.JPanel panel = new javax.swing.JPanel();
+            panel.setOpaque(true);
+            panel.setBackground(bg);
             panel.setLayout(new javax.swing.BoxLayout(panel, javax.swing.BoxLayout.Y_AXIS));
-            panel.setBorder(javax.swing.BorderFactory.createEmptyBorder(6, 2, 2, 2));
+            panel.setBorder(javax.swing.BorderFactory.createEmptyBorder(4, 4, 4, 4));
             
             // Header panel with Title and Uninstall button
             javax.swing.JPanel headerPanel = new javax.swing.JPanel(new java.awt.BorderLayout());
-            headerPanel.setOpaque(false);
+            headerPanel.setOpaque(true);
+            headerPanel.setBackground(bg);
             headerPanel.setAlignmentX(java.awt.Component.LEFT_ALIGNMENT);
             
             // Title Label with icon (avoids missing-glyph boxes on some systems)
@@ -3081,23 +3231,53 @@ public class Main {
             
             // Create styled OK button
             javax.swing.JButton okButton = createStyledButton("OK");
+
+            // Use a custom dialog instead of JOptionPane to avoid Windows L&F ghosting artifacts
+            // (stale text being left behind in the bottom-right).
+            final javax.swing.JDialog dialog = new javax.swing.JDialog((java.awt.Frame) null, PROJECT_NAME + " v" + VERSION + " — Installed", true);
+            dialog.setDefaultCloseOperation(javax.swing.WindowConstants.DISPOSE_ON_CLOSE);
+            dialog.setResizable(false);
+            try {
+                javax.swing.RepaintManager.currentManager(dialog).setDoubleBufferingEnabled(true);
+            } catch (Throwable ignored) {
+                // ignore
+            }
+
+            // Paint full background every repaint to prevent hover/partial repaint artifacts.
+            javax.swing.JPanel root = new javax.swing.JPanel(new java.awt.BorderLayout(0, 10)) {
+                @Override
+                protected void paintComponent(java.awt.Graphics g) {
+                    g.setColor(bg);
+                    g.fillRect(0, 0, getWidth(), getHeight());
+                    super.paintComponent(g);
+                }
+            };
+            // Keep the root panel opaque to avoid hover/unhover ghosting on some Windows L&Fs.
+            root.setOpaque(true);
+            root.setBackground(bg);
+            root.setDoubleBuffered(true);
+            root.setBorder(javax.swing.BorderFactory.createEmptyBorder(12, 12, 12, 12));
+            root.setPreferredSize(new java.awt.Dimension(560, 240));
+
+            root.add(panel, java.awt.BorderLayout.CENTER);
+
+            javax.swing.JPanel buttons = new javax.swing.JPanel(new java.awt.FlowLayout(java.awt.FlowLayout.CENTER, 0, 0));
+            buttons.setOpaque(true);
+            buttons.setBackground(bg);
+            buttons.add(okButton);
+            root.add(buttons, java.awt.BorderLayout.SOUTH);
+
             okButton.addActionListener(new java.awt.event.ActionListener() {
                 public void actionPerformed(java.awt.event.ActionEvent e) {
-                    java.awt.Window w = javax.swing.SwingUtilities.getWindowAncestor(okButton);
-                    if (w != null) w.dispose();
+                    dialog.dispose();
                 }
             });
 
-            javax.swing.JOptionPane.showOptionDialog(
-                null,
-                panel,
-                PROJECT_NAME + " v" + VERSION + " — Installed",
-                javax.swing.JOptionPane.DEFAULT_OPTION,
-                javax.swing.JOptionPane.PLAIN_MESSAGE,
-                null,
-                new Object[]{ okButton },
-                okButton
-            );
+            dialog.setContentPane(root);
+            dialog.pack();
+            dialog.setMinimumSize(new java.awt.Dimension(560, 240));
+            dialog.setLocationRelativeTo(null);
+            dialog.setVisible(true);
 
             restartSavedLaunchersAfterConfirmation();
         } catch (Exception e) {
@@ -3179,6 +3359,22 @@ public class Main {
             protected void paintComponent(java.awt.Graphics g) {
                 java.awt.Graphics2D g2 = (java.awt.Graphics2D) g.create();
                 g2.setRenderingHint(java.awt.RenderingHints.KEY_ANTIALIASING, java.awt.RenderingHints.VALUE_ANTIALIAS_ON);
+
+                // Clear full bounds first (prevents hover repaint trails/ghosting on some Windows L&Fs).
+                java.awt.Color clear = null;
+                try {
+                    java.awt.Container p = getParent();
+                    if (p != null) {
+                        clear = p.getBackground();
+                    }
+                } catch (Throwable ignored) {
+                    clear = null;
+                }
+                if (clear == null) {
+                    clear = new java.awt.Color(43, 43, 43);
+                }
+                g2.setColor(clear);
+                g2.fillRect(0, 0, getWidth(), getHeight());
                 
                 // Determine background color based on state
                 java.awt.Color bgColor;
@@ -3205,11 +3401,10 @@ public class Main {
                 if (w > 1 && h > 1) {
                     g2.drawRoundRect(x, y, w - 1, h - 1, arc, arc);
                 }
-                
+
+                // Paint text and icon over the custom background using the same AA-enabled Graphics.
+                super.paintComponent(g2);
                 g2.dispose();
-                
-                // Paint text and icon over the custom background
-                super.paintComponent(g);
             }
         };
         
@@ -3221,11 +3416,27 @@ public class Main {
         btn.setContentAreaFilled(false);
         btn.setFocusPainted(false);
         btn.setBorderPainted(false);
+        // Keep the button non-opaque so Swing doesn't fill a square background behind our rounded paint.
         btn.setOpaque(false);
         btn.setRolloverEnabled(true);
+        btn.setDoubleBuffered(true);
         
         // Add padding (top, left, bottom, right)
         btn.setBorder(javax.swing.BorderFactory.createEmptyBorder(8, 20, 8, 20));
+
+        // Force repaints of the parent region on rollover/press changes.
+        // This eliminates occasional 1px hover trails on Windows when leaving the button.
+        btn.getModel().addChangeListener(new javax.swing.event.ChangeListener() {
+            @Override
+            public void stateChanged(javax.swing.event.ChangeEvent e) {
+                btn.repaint();
+                java.awt.Container p = btn.getParent();
+                if (p != null) {
+                    int pad = 2;
+                    p.repaint(btn.getX() - pad, btn.getY() - pad, btn.getWidth() + pad * 2, btn.getHeight() + pad * 2);
+                }
+            }
+        });
         
         return btn;
     }
@@ -3461,6 +3672,37 @@ public class Main {
         try {
             String jarPath = getJarPath();
             System.out.println("[" + PROJECT_NAME + "] JAR path: " + jarPath);
+
+            // Before spawning the watcher, optionally check GitHub releases for an update.
+            // If an update is accepted, we download it, schedule an out-of-process replace,
+            // and also schedule the watcher spawn from the updated JAR, then exit 0.
+            try {
+                launcherLog("[Updater] Starting update check...");
+                boolean updateScheduled = Updater.maybeUpdateAndRescheduleWatcher(
+                    PROJECT_NAME,
+                    VERSION,
+                    jarPath,
+                    getCurrentJavaExecutablePath(),
+                    System.getProperty("user.dir"),
+                    new Updater.LogSink() {
+                        @Override
+                        public void log(String msg) {
+                            launcherLog("[Updater] " + msg);
+                        }
+                    }
+                );
+                if (updateScheduled) {
+                    System.out.println("[" + PROJECT_NAME + "] Update scheduled; launcher exiting so game launch can continue.");
+                    launcherLog("[Updater] Update scheduled; exiting launcher.");
+                    return 0;
+                }
+
+                launcherLog("[Updater] No update scheduled; continuing normal launch.");
+            } catch (Throwable t) {
+                // Non-fatal: if the updater fails for any reason, continue normally.
+                System.err.println("[" + PROJECT_NAME + "] Update check failed (continuing): " + t.getMessage());
+                launcherLog("[Updater] Skipped due to error: " + t.getClass().getSimpleName() + ": " + (t.getMessage() != null ? t.getMessage() : ""));
+            }
 
             String workingDir = System.getProperty("user.dir");
 
@@ -4042,12 +4284,51 @@ public class Main {
             File workingDir = new File(cwd);
             File logDir = workingDir.getParentFile() != null ? workingDir.getParentFile() : workingDir;
             File logFile = new File(logDir, LOG_FILE);
-            logWriter = new PrintWriter(new FileWriter(logFile, false)); // Overwrite
+            // Append so that pre-launch/update-check logs written before watcher startup are preserved.
+            logWriter = new PrintWriter(new FileWriter(logFile, true));
             log("=== " + PROJECT_NAME + " v" + VERSION + " Watcher Log ===");
             log("Log file: " + logFile.getAbsolutePath());
             log("Working directory: " + cwd);
         } catch (Exception e) {
             System.err.println("Failed to initialize log file: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Best-effort launcher logging to the same injector log file used by watcher mode.
+     * This runs before watcher starts, so we do not reuse watcher-mode PrintWriter.
+     */
+    private static void launcherLog(String message) {
+        String msg = message != null ? message : "";
+        String timestamp;
+        try {
+            timestamp = dateFormat.format(new Date());
+        } catch (Throwable ignored) {
+            timestamp = "";
+        }
+        String line = (timestamp.isEmpty() ? "" : ("[" + timestamp + "] ")) + msg;
+
+        // Console for visibility in launcher stdout.
+        try {
+            System.out.println(line);
+        } catch (Throwable ignored) {
+            // ignore
+        }
+
+        // Append to injector.log (best-effort).
+        try {
+            String cwd = System.getProperty("user.dir");
+            File workingDir = new File(cwd);
+            File logDir = workingDir.getParentFile() != null ? workingDir.getParentFile() : workingDir;
+            File logFile = new File(logDir, LOG_FILE);
+            FileWriter fw = new FileWriter(logFile, true);
+            try {
+                fw.write(line + System.lineSeparator());
+            } finally {
+                try { fw.close(); } catch (Throwable ignored) {}
+            }
+        } catch (Throwable ignored) {
+            // ignore
         }
     }
 

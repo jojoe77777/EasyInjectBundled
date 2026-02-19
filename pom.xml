@@ -43,6 +43,13 @@
             <version>5.14.0</version>
         </dependency>
 
+        <!-- JSON parsing for GitHub Releases update checks -->
+        <dependency>
+            <groupId>com.google.code.gson</groupId>
+            <artifactId>gson</artifactId>
+            <version>2.11.0</version>
+        </dependency>
+
     </dependencies>
 
     <build>
