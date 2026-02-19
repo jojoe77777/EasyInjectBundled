@@ -9,11 +9,14 @@ import com.sun.jna.platform.win32.WinNT;
 import com.sun.jna.ptr.IntByReference;
 
 import java.io.ByteArrayOutputStream;
+import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.io.PrintWriter;
 import java.io.StringWriter;
@@ -32,6 +35,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
+import java.nio.charset.Charset;
 import java.nio.file.Path;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
@@ -233,6 +237,7 @@ public class Main {
             // MultiMC / Prism Launcher - install via instance.cfg
             InstallResult result = installPreLaunchCommand(instanceCfg, prelaunchCommand);
             if (result.success) {
+                ensurePrelaunchTxtExists(instanceDir);
                 showSuccessDialog(jarRelativePath, instanceCfg, instanceDir);
             } else {
                 showErrorDialog(result.error);
@@ -241,6 +246,7 @@ public class Main {
             // ATLauncher - install via instance.json
             InstallResult result = installPreLaunchCommandJson(instanceJson, prelaunchCommand + " " + PRELAUNCH_ARG);
             if (result.success) {
+                ensurePrelaunchTxtExists(instanceDir);
                 showSuccessDialog(jarRelativePath, instanceJson, instanceDir);
             } else {
                 showErrorDialog(result.error);
@@ -248,6 +254,37 @@ public class Main {
         } else {
             // No instance config found - show the setup warning
             showNoInstanceCfgWarning(prelaunchCommand);
+        }
+    }
+
+    /**
+     * Create an empty prelaunch.txt file in the instance root folder (best-effort).
+     *
+     * This is used as a user-editable prelaunch chain file. If the file already exists,
+     * it is left untouched.
+     */
+    private static void ensurePrelaunchTxtExists(File instanceDir) {
+        if (instanceDir == null || !instanceDir.isDirectory()) {
+            return;
+        }
+
+        try {
+            File f = new File(instanceDir, "prelaunch.txt");
+            if (f.exists()) {
+                return;
+            }
+
+            // Ensure parent exists and create empty file.
+            File parent = f.getParentFile();
+            if (parent != null && !parent.exists()) {
+                //noinspection ResultOfMethodCallIgnored
+                parent.mkdirs();
+            }
+
+            //noinspection ResultOfMethodCallIgnored
+            f.createNewFile();
+        } catch (Throwable ignored) {
+            // Best-effort; do not block installation.
         }
     }
 
@@ -3741,9 +3778,13 @@ public class Main {
      * Execute pre-existing pre-launch command(s) forwarded as encoded args.
      */
     private static boolean runForwardedPreLaunchChain(String[] args) {
+        // Run any previously configured prelaunch commands (forwarded from Prism/MultiMC chain)
+        // and also execute user-provided per-instance commands from prelaunch.txt.
+
         String escapedChain = getArgumentValue(args, FORWARDED_PRELAUNCH_CHAIN_ARG);
         if (escapedChain == null || escapedChain.trim().isEmpty()) {
-            return true;
+            // Still allow prelaunch.txt even if no forwarded chain exists.
+            return runInstancePrelaunchTxtChain();
         }
 
         String chain = unescapeForwardedPreLaunchChain(escapedChain);
@@ -3766,7 +3807,8 @@ public class Main {
                 return false;
             }
 
-            return true;
+            // After forwarded prelaunch steps succeed, run user-defined steps.
+            return runInstancePrelaunchTxtChain();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             System.err.println("[" + PROJECT_NAME + "] Forwarded pre-launch execution interrupted.");
@@ -3775,6 +3817,118 @@ public class Main {
             System.err.println("[" + PROJECT_NAME + "] Failed to execute forwarded pre-launch command(s): " + e.getMessage());
             return false;
         }
+    }
+
+    /**
+     * Execute each non-empty line in prelaunch.txt in the instance root folder.
+     * Lines starting with '#', ';', or '//' are treated as comments.
+     */
+    private static boolean runInstancePrelaunchTxtChain() {
+        File instanceRoot = resolveInstanceRootDir();
+        if (instanceRoot == null) {
+            return true;
+        }
+
+        File prelaunchTxt = new File(instanceRoot, "prelaunch.txt");
+        if (!prelaunchTxt.exists() || !prelaunchTxt.isFile()) {
+            return true;
+        }
+
+        System.out.println("[" + PROJECT_NAME + "] Executing prelaunch.txt chain...");
+
+        BufferedReader reader = null;
+        try {
+            reader = new BufferedReader(new InputStreamReader(new FileInputStream(prelaunchTxt), Charset.defaultCharset()));
+
+            String line;
+            int lineNo = 0;
+            while ((line = reader.readLine()) != null) {
+                lineNo++;
+
+                String trimmed = line.trim();
+                if (trimmed.isEmpty()) {
+                    continue;
+                }
+                if (trimmed.startsWith("#") || trimmed.startsWith(";") || trimmed.startsWith("//")) {
+                    continue;
+                }
+
+                System.out.println("[" + PROJECT_NAME + "] prelaunch.txt#" + lineNo + ": " + trimmed);
+
+                ProcessBuilder pb = new ProcessBuilder("cmd", "/C", trimmed);
+                pb.directory(instanceRoot);
+                pb.inheritIO();
+
+                Process p = pb.start();
+                int exit = p.waitFor();
+                if (exit != 0) {
+                    System.err.println("[" + PROJECT_NAME + "] prelaunch.txt line " + lineNo + " failed with exit code: " + exit);
+                    return false;
+                }
+            }
+
+            return true;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            System.err.println("[" + PROJECT_NAME + "] prelaunch.txt execution interrupted.");
+            return false;
+        } catch (Exception e) {
+            System.err.println("[" + PROJECT_NAME + "] Failed to execute prelaunch.txt: " + (e.getMessage() != null ? e.getMessage() : e.toString()));
+            return false;
+        } finally {
+            if (reader != null) {
+                try { reader.close(); } catch (Throwable ignored) {}
+            }
+        }
+    }
+
+    /**
+     * Resolve the instance root directory (where instance.cfg / instance.json typically lives).
+     *
+     * - If the JAR is inside minecraft/.minecraft, the instance root is the parent folder.
+     * - Otherwise, the instance root is the JAR's folder.
+     * - Falls back to the current working directory.
+     */
+    private static File resolveInstanceRootDir() {
+        // Prefer jar location when available.
+        try {
+            String jarPath = getJarPath();
+            if (jarPath != null && !jarPath.trim().isEmpty()) {
+                File jarFile = new File(jarPath);
+                File jarDir = jarFile.getParentFile();
+                if (jarDir != null) {
+                    File instanceRoot = jarDir;
+                    String dirName = jarDir.getName().toLowerCase();
+                    if (dirName.equals("minecraft") || dirName.equals(".minecraft")) {
+                        instanceRoot = jarDir.getParentFile();
+                    }
+                    if (instanceRoot != null && instanceRoot.isDirectory()) {
+                        return instanceRoot;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+            // Fall through.
+        }
+
+        // Fallback to working directory; if it's minecraft/.minecraft, return parent.
+        try {
+            File wd = new File(System.getProperty("user.dir"));
+            if (wd.isDirectory()) {
+                String dirName = wd.getName().toLowerCase();
+                if (dirName.equals("minecraft") || dirName.equals(".minecraft")) {
+                    File parent = wd.getParentFile();
+                    if (parent != null && parent.isDirectory()) {
+                        return parent;
+                    }
+                }
+                return wd;
+            }
+        } catch (Throwable ignored) {
+            // ignore
+        }
+
+        return null;
     }
 
     /**
