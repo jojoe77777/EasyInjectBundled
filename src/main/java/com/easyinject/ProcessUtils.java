@@ -21,8 +21,8 @@ public class ProcessUtils {
     private static final WindowsNative.User32Ex user32 = WindowsNative.User32Ex.INSTANCE;
 
     // Debug logging for window enumeration/title reads.
-    // Enabled by default (opt-out) because diagnosing window detection issues is otherwise painful.
-    // Disable with: -Deasyinject.debug.windows=false or environment EASYINJECT_DEBUG_WINDOWS=0
+    // Disabled by default to avoid log spam
+    // Enable with: -Deasyinject.debug.windows=true
     private static final boolean DEBUG_WINDOWS = isWindowsDebugEnabled();
 
     private static boolean isWindowsDebugEnabled() {
@@ -42,23 +42,7 @@ public class ProcessUtils {
             }
         }
 
-        String env = null;
-        try {
-            env = System.getenv("EASYINJECT_DEBUG_WINDOWS");
-        } catch (Throwable ignored) {
-            // ignore
-        }
-        if (env != null) {
-            String e = env.trim();
-            if (e.equalsIgnoreCase("false") || e.equals("0") || e.equalsIgnoreCase("off") || e.equalsIgnoreCase("no")) {
-                return false;
-            }
-            if (e.equalsIgnoreCase("true") || e.equals("1") || e.equalsIgnoreCase("on") || e.equalsIgnoreCase("yes")) {
-                return true;
-            }
-        }
-
-        return true; // default ON
+        return false; // default OFF
     }
 
     private static void debugWindows(String msg) {
