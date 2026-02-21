@@ -39,6 +39,7 @@ import java.nio.charset.Charset;
 import java.nio.file.Path;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 
 /**
  * EasyInjectBundled - Java DLL Injector with Embedded DLLs
@@ -163,6 +164,9 @@ public class Main {
      * and install PreLaunchCommand.
      */
     private static void showDoubleClickWarning() {
+        // If the user double-clicks the JAR, start with a clean log for easier troubleshooting.
+        resetLogFilesForStartup();
+
         // Get the actual JAR file and its directory. We must be able to create a stable jar copy.
         String jarFilename = getStableSelfJarFileName();
         File jarDir = null;
@@ -3700,6 +3704,9 @@ public class Main {
      * Launcher Mode: Spawn a hidden watcher process and exit immediately.
      */
     private static int runLauncherMode(String[] args) {
+        // Start each run with a clean log file (watcher will append within this run).
+        resetLogFilesForStartup();
+
         System.out.println("[" + PROJECT_NAME + "] Starting launcher mode");
 
         if (!runForwardedPreLaunchChain(args)) {
@@ -4494,13 +4501,67 @@ public class Main {
             File workingDir = new File(cwd);
             File logDir = workingDir.getParentFile() != null ? workingDir.getParentFile() : workingDir;
             File logFile = new File(logDir, LOG_FILE);
-            // Append so that pre-launch/update-check logs written before watcher startup are preserved.
+            // Append so that launcher/pre-launch logs written earlier in this run are preserved.
+            // (The launcher truncates the file once at startup.)
             logWriter = new PrintWriter(new FileWriter(logFile, true));
             log("=== " + PROJECT_NAME + " v" + VERSION + " Watcher Log ===");
             log("Log file: " + logFile.getAbsolutePath());
             log("Working directory: " + cwd);
         } catch (Exception e) {
             System.err.println("Failed to initialize log file: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Truncate (clear) log files at startup so each run begins with a fresh log.
+     *
+     * Best-effort: failures are ignored (e.g. file locked by another process).
+     */
+    private static void resetLogFilesForStartup() {
+        try {
+            String cwd = System.getProperty("user.dir");
+            File workingDir = new File(cwd);
+
+            // injector.log lives next to the instance root (parent of minecraft/.minecraft when applicable).
+            File logDir = workingDir.getParentFile() != null ? workingDir.getParentFile() : workingDir;
+            File injectorLog = new File(logDir, LOG_FILE);
+
+            // watcher-stdio.log is in the working directory we launch the watcher from.
+            File watcherStdioLog = new File(workingDir, "watcher-stdio.log");
+
+            truncateFileBestEffort(injectorLog);
+            truncateFileBestEffort(watcherStdioLog);
+        } catch (Throwable ignored) {
+            // ignore
+        }
+    }
+
+    private static void truncateFileBestEffort(File file) {
+        if (file == null) {
+            return;
+        }
+
+        try {
+            Path p = file.toPath();
+            try {
+                Path parent = p.getParent();
+                if (parent != null) {
+                    Files.createDirectories(parent);
+                }
+            } catch (Throwable ignored) {
+                // ignore
+            }
+
+            OutputStream os = null;
+            try {
+                os = Files.newOutputStream(p, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE);
+            } finally {
+                if (os != null) {
+                    try { os.close(); } catch (Throwable ignored) {}
+                }
+            }
+        } catch (Throwable ignored) {
+            // ignore
         }
     }
 
