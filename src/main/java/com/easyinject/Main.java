@@ -3712,7 +3712,10 @@ public class Main {
 
             // Before spawning the watcher, optionally check GitHub releases for an update.
             // If an update is accepted, we download it, schedule an out-of-process replace,
-            // and also schedule the watcher spawn from the updated JAR, then exit 0.
+            // and also schedule the watcher spawn from the updated JAR.
+            // IMPORTANT: In pre-launch mode, returning a non-zero exit code prevents the
+            // game from launching. We intentionally exit 1 when an update is scheduled so
+            // the launcher stops here, giving the updater time to replace the JAR.
             try {
                 launcherLog("[Updater] Starting update check...");
                 boolean updateScheduled = Updater.maybeUpdateAndRescheduleWatcher(
@@ -3729,9 +3732,12 @@ public class Main {
                     }
                 );
                 if (updateScheduled) {
-                    System.out.println("[" + PROJECT_NAME + "] Update scheduled; launcher exiting so game launch can continue.");
-                    launcherLog("[Updater] Update scheduled; exiting launcher.");
-                    return 0;
+                    // Make it extremely obvious to the user that they must start the instance again.
+                    // This runs in pre-launch context, so a modal dialog is the most reliable.
+                    showUpdateRestartRequiredDialogBlocking();
+                    System.out.println("[" + PROJECT_NAME + "] Update scheduled; launcher exiting with code 1 to prevent game launch.");
+                    launcherLog("[Updater] Update scheduled; exiting launcher with code 1.");
+                    return 1;
                 }
 
                 launcherLog("[Updater] No update scheduled; continuing normal launch.");
@@ -3771,6 +3777,56 @@ public class Main {
             System.err.println("[" + PROJECT_NAME + "] ERROR: Failed to spawn watcher process: " + e.getMessage());
             e.printStackTrace();
             return 1;
+        }
+    }
+
+    /**
+     * When a self-update is scheduled from pre-launch mode, we intentionally exit with code 1 to
+     * prevent the game from launching. This dialog makes that behavior explicit and tells the
+     * user to start the instance again.
+     */
+    private static void showUpdateRestartRequiredDialogBlocking() {
+        try {
+            applyDarkTheme();
+
+            StringBuilder body = new StringBuilder();
+            body.append("<html><body style='width: 460px; font-family: Segoe UI, sans-serif; color: #e0e0e0;'>");
+            body.append("<p style='margin:0 0 12px 0; color:#FF5252; font-size: 26px;'><b>UPDATE INSTALLED</b></p>");
+            body.append("<p style='margin:0 0 12px 0; font-size: 18px;'><b>Please start the instance again.</b></p>");
+            body.append("<p style='margin:0 0 10px 0; color:#c7ced6; font-size: 13px;'>");
+            body.append("This window appeared because ").append(escapeHtml(PROJECT_NAME)).append(" updated itself.");
+            body.append(" The game launch was stopped on purpose so the updated JAR can be applied safely.");
+            body.append("</p>");
+            body.append("<p style='margin:0; color:#9e9e9e; font-size: 12px;'>");
+            body.append("Close this message, then click <b>Play</b> / <b>Launch</b> again in your launcher.");
+            body.append("</p>");
+            body.append("</body></html>");
+
+            javax.swing.JLabel msgLabel = new javax.swing.JLabel(body.toString());
+            javax.swing.JButton okButton = createStyledButton("OK — I'll start it again");
+
+            // Blocking dialog (modal) so the user sees it before we exit with code 1.
+            showBlockingOptionDialog(
+                PROJECT_NAME + " — Restart Required",
+                msgLabel,
+                new Object[] { okButton },
+                0
+            );
+        } catch (Throwable ignored) {
+            // Fallback: console output (may not be visible in launcher context, but best-effort).
+            System.out.println("=======================================================");
+            System.out.println("  UPDATE INSTALLED — RESTART REQUIRED");
+            System.out.println("=======================================================");
+            System.out.println();
+            System.out.println("" + PROJECT_NAME + " updated itself.");
+            System.out.println("Start the instance again in your launcher.");
+            System.out.println();
+            try {
+                System.out.println("Press Enter to close...");
+                System.in.read();
+            } catch (Throwable ignored2) {
+                // ignore
+            }
         }
     }
 
