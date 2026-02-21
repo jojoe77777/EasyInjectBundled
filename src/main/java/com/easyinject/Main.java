@@ -4088,8 +4088,8 @@ public class Main {
             int pollCount = 0;
 
             while (true) {
-                List<ProcessUtils.ProcessInfo> currentProcs = ProcessUtils.findJavaProcesses();
-                log("[" + PROJECT_NAME + "] Poll #" + (pollCount + 1) + ": found " + currentProcs.size() + " Java process(es)");
+                List<ProcessUtils.ProcessInfo> currentProcs = ProcessUtils.findJavaLeafProcesses();
+                log("[" + PROJECT_NAME + "] Poll #" + (pollCount + 1) + ": found " + currentProcs.size() + " Java leaf process(es)");
             
                 for (ProcessUtils.ProcessInfo proc : currentProcs) {
                     log("[" + PROJECT_NAME + "] Inspecting PID " + proc.processId + " (" + proc.exeName + ")");

@@ -122,6 +122,57 @@ public class ProcessUtils {
     }
 
     /**
+     * Find Java processes (java.exe/javaw.exe) that do NOT have child processes.
+     *
+     * This is computed from a single Toolhelp process snapshot by:
+     * 1) collecting all candidate Java PIDs
+     * 2) collecting all parent PIDs (th32ParentProcessID)
+     * 3) returning only Java PIDs not present in the parent PID set
+     */
+    public static List<ProcessInfo> findJavaLeafProcesses() {
+        List<ProcessInfo> javaProcesses = new ArrayList<ProcessInfo>();
+        Set<Integer> parents = new HashSet<Integer>();
+
+        HANDLE snapshot = kernel32Ex.CreateToolhelp32Snapshot(WindowsNative.TH32CS_SNAPPROCESS, 0);
+        if (snapshot == null || snapshot.equals(INVALID_HANDLE_VALUE)) {
+            return javaProcesses;
+        }
+
+        try {
+            WindowsNative.PROCESSENTRY32.ByReference pe32 = new WindowsNative.PROCESSENTRY32.ByReference();
+
+            if (kernel32Ex.Process32First(snapshot, pe32)) {
+                do {
+                    int ppid = pe32.th32ParentProcessID;
+                    if (ppid > 0) {
+                        parents.add(ppid);
+                    }
+
+                    String exeName = pe32.getExeFile();
+                    if (exeName != null && (exeName.equalsIgnoreCase("java.exe") || exeName.equalsIgnoreCase("javaw.exe"))) {
+                        javaProcesses.add(new ProcessInfo(pe32.th32ProcessID, exeName));
+                    }
+                } while (kernel32Ex.Process32Next(snapshot, pe32));
+            }
+        } finally {
+            kernel32Ex.CloseHandle(snapshot);
+        }
+
+        if (javaProcesses.isEmpty() || parents.isEmpty()) {
+            // If there are no Java processes (or we couldn't build the parent set), return what we have.
+            return javaProcesses;
+        }
+
+        List<ProcessInfo> leaf = new ArrayList<ProcessInfo>();
+        for (ProcessInfo p : javaProcesses) {
+            if (!parents.contains(p.processId)) {
+                leaf.add(p);
+            }
+        }
+        return leaf;
+    }
+
+    /**
      * Find running processes by exact image name (case-insensitive), e.g. "prismlauncher.exe".
      */
     public static List<ProcessInfo> findProcessesByImageNames(String... imageNames) {
