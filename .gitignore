@@ -16,3 +16,15 @@ buildNumber.properties
 # JDT-specific (Eclipse Java Development Tools)
 .classpath
 custom-dlls
+
+exe/build
+exe/CMakeFiles
+exe/EasyInjectExe.dir
+exe/Release
+exe/x64
+exe/CMakeCache.txt
+exe/*.sln
+exe/*.vcxproj
+exe/*.vcxproj.filters
+exe/*.vcxproj.user
+exe/cmake_install.cmake
