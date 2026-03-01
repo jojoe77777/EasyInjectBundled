@@ -9,8 +9,8 @@
  *   - Install Mode (double-click): detect instance.cfg / instance.json, install PreLaunchCommand,
  *     Windows Defender exclusion, Smart App Control detection
  *
- * DLLs are shipped in a dlls/ folder next to the EXE (not embedded in a JAR).
- * At runtime they are copied to %USERPROFILE%/.config/<brand>/dlls for injection.
+ * DLLs and branding.properties are embedded directly in the EXE as Win32 resources.
+ * At runtime, embedded DLLs are extracted to %USERPROFILE%/.config/<brand>/dlls for injection.
  * The auto-updater downloads an .exe from GitHub releases.
  */
 
@@ -74,6 +74,8 @@ static const wchar_t* DEFENDER_ELEVATED_SELFEXE_ARG  = L"--defender-elevated-sel
 static const wchar_t* DEFENDER_ELEVATED_OUT_ARG      = L"--defender-elevated-out";
 static const wchar_t* LOGGER_DLL_NAME   = L"liblogger_x64.dll";
 static const wchar_t* LOG_FILE_NAME     = L"injector.log";
+static const int BRANDING_RESOURCE_ID = 101;
+static const int DLL_INDEX_RESOURCE_ID = 102;
 static const int POLL_INTERVAL_MS       = 500;
 static const int TARGET_LEAF_RECHECK_MS = 2000;
 static const int TIMEOUT_SECONDS        = 60;
@@ -86,6 +88,11 @@ static std::string g_version     = "1.0";
 static std::string g_updateApiUrl;
 static std::string g_releasesUrl;
 static std::string g_assetNameRegex;
+
+struct EmbeddedDllEntry {
+    int resourceId;
+    std::string fileName;
+};
 
 // ============================================================================
 // Logging
@@ -197,6 +204,68 @@ static bool iequalsW(const std::wstring& a, const std::wstring& b) {
     return toLowerW(a) == toLowerW(b);
 }
 
+static std::wstring normalizeCrLf(const std::wstring& s) {
+    if (s.empty()) return {};
+    std::wstring out;
+    out.reserve(s.size() + 16);
+    for (size_t i = 0; i < s.size(); ++i) {
+        wchar_t c = s[i];
+        if (c == L'\r') {
+            out.push_back(L'\r');
+            if (i + 1 < s.size() && s[i + 1] == L'\n') {
+                out.push_back(L'\n');
+                ++i;
+            } else {
+                out.push_back(L'\n');
+            }
+        } else if (c == L'\n') {
+            out.push_back(L'\r');
+            out.push_back(L'\n');
+        } else {
+            out.push_back(c);
+        }
+    }
+    return out;
+}
+
+static void enableHighDpiAwareness() {
+    HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    if (user32) {
+        using SetProcessDpiAwarenessContextFn = BOOL(WINAPI*)(HANDLE);
+        auto setContext = reinterpret_cast<SetProcessDpiAwarenessContextFn>(
+            GetProcAddress(user32, "SetProcessDpiAwarenessContext")
+        );
+        if (setContext) {
+            const HANDLE perMonitorV2 = reinterpret_cast<HANDLE>(static_cast<INT_PTR>(-4));
+            const HANDLE perMonitor = reinterpret_cast<HANDLE>(static_cast<INT_PTR>(-3));
+            const HANDLE systemAware = reinterpret_cast<HANDLE>(static_cast<INT_PTR>(-2));
+            if (setContext(perMonitorV2) || setContext(perMonitor) || setContext(systemAware)) {
+                return;
+            }
+        }
+    }
+
+    HMODULE shcore = LoadLibraryW(L"shcore.dll");
+    if (shcore) {
+        using SetProcessDpiAwarenessFn = HRESULT(WINAPI*)(int);
+        auto setAwareness = reinterpret_cast<SetProcessDpiAwarenessFn>(
+            GetProcAddress(shcore, "SetProcessDpiAwareness")
+        );
+        if (setAwareness) {
+            const int PROCESS_PER_MONITOR_DPI_AWARE = 2;
+            const int PROCESS_SYSTEM_DPI_AWARE = 1;
+            if (SUCCEEDED(setAwareness(PROCESS_PER_MONITOR_DPI_AWARE)) ||
+                SUCCEEDED(setAwareness(PROCESS_SYSTEM_DPI_AWARE))) {
+                FreeLibrary(shcore);
+                return;
+            }
+        }
+        FreeLibrary(shcore);
+    }
+
+    SetProcessDPIAware();
+}
+
 static std::string escapeHtml(const std::string& s) {
     std::string out;
     out.reserve(s.size());
@@ -212,6 +281,748 @@ static std::string escapeHtml(const std::string& s) {
     }
     return out;
 }
+
+// ============================================================================
+// Custom dark popup UI
+// ============================================================================
+namespace Ui {
+
+enum class DialogTone {
+    Info,
+    Warning,
+    Error,
+    Question,
+    Success,
+};
+
+struct DialogButton {
+    int id;
+    std::wstring label;
+    bool isDefault = false;
+};
+
+struct DialogOptions {
+    std::wstring title;
+    std::wstring heading;
+    std::wstring message;
+    DialogTone tone = DialogTone::Info;
+    std::vector<DialogButton> buttons;
+    int cancelResult = IDCANCEL;
+    bool topMost = false;
+    int width = 700;
+};
+
+static const wchar_t* DARK_DIALOG_CLASS = L"EasyInject.DarkDialog";
+
+struct DarkDialogState {
+    DialogOptions options;
+    int result = IDCANCEL;
+    int defaultButtonId = IDOK;
+
+    HWND hwndTitle = nullptr;
+    std::vector<HWND> buttonHwnds;
+    RECT bodyRect{};
+
+    HFONT titleFont = nullptr;
+    HFONT bodyFont = nullptr;
+    HFONT buttonFont = nullptr;
+
+    HBRUSH bgBrush = nullptr;
+    HBRUSH bodyBrush = nullptr;
+};
+
+static constexpr COLORREF COLOR_BG = RGB(43, 43, 43);
+static constexpr COLORREF COLOR_TEXT = RGB(224, 224, 224);
+static constexpr COLORREF COLOR_MUTED_TEXT = RGB(199, 206, 214);
+static constexpr COLORREF COLOR_BODY_BG = RGB(39, 39, 39);
+static constexpr COLORREF COLOR_BODY_BORDER = RGB(52, 52, 52);
+static constexpr COLORREF COLOR_BUTTON_BG = RGB(60, 60, 60);
+static constexpr COLORREF COLOR_BUTTON_BG_HOT = RGB(69, 69, 69);
+static constexpr COLORREF COLOR_BUTTON_BG_ACTIVE = RGB(74, 74, 74);
+static constexpr COLORREF COLOR_BUTTON_BORDER = RGB(90, 90, 90);
+static constexpr int BASE_PAD = 16;
+static constexpr int BASE_TITLE_HEIGHT = 24;
+static constexpr int BASE_TITLE_SPACING = 8;
+static constexpr int BASE_BODY_MIN_HEIGHT = 110;
+static constexpr int BASE_BUTTON_TOP_GAP = 12;
+static constexpr int BASE_BUTTON_HEIGHT = 34;
+static constexpr int BASE_BUTTON_GAP = 10;
+
+static COLORREF accentForTone(DialogTone tone) {
+    switch (tone) {
+        case DialogTone::Warning: return RGB(255, 179, 0);
+        case DialogTone::Error: return RGB(239, 83, 80);
+        case DialogTone::Question: return RGB(129, 212, 250);
+        case DialogTone::Success: return RGB(102, 187, 106);
+        case DialogTone::Info:
+        default: return RGB(129, 212, 250);
+    }
+}
+
+static std::wstring defaultHeadingForTone(DialogTone tone) {
+    switch (tone) {
+        case DialogTone::Warning: return L"Warning";
+        case DialogTone::Error: return L"Error";
+        case DialogTone::Question: return L"Action Required";
+        case DialogTone::Success: return L"Success";
+        case DialogTone::Info:
+        default: return L"Information";
+    }
+}
+
+static HFONT createUiFont(int pointSize, int weight = FW_NORMAL) {
+    HDC hdc = GetDC(nullptr);
+    int dpi = hdc ? GetDeviceCaps(hdc, LOGPIXELSY) : 96;
+    if (hdc) ReleaseDC(nullptr, hdc);
+    int height = -MulDiv(pointSize, dpi, 72);
+    return CreateFontW(height, 0, 0, 0, weight, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+}
+
+static UINT queryWindowDpi(HWND hwnd) {
+    if (!hwnd) return 96;
+    HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    if (user32) {
+        using GetDpiForWindowFn = UINT(WINAPI*)(HWND);
+        auto fn = reinterpret_cast<GetDpiForWindowFn>(GetProcAddress(user32, "GetDpiForWindow"));
+        if (fn) {
+            UINT dpi = fn(hwnd);
+            if (dpi != 0) return dpi;
+        }
+    }
+    HDC hdc = GetDC(hwnd);
+    UINT dpi = hdc ? static_cast<UINT>(GetDeviceCaps(hdc, LOGPIXELSY)) : 96;
+    if (hdc) ReleaseDC(hwnd, hdc);
+    return dpi == 0 ? 96 : dpi;
+}
+
+static UINT querySystemDpi() {
+    HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    if (user32) {
+        using GetDpiForSystemFn = UINT(WINAPI*)();
+        auto fn = reinterpret_cast<GetDpiForSystemFn>(GetProcAddress(user32, "GetDpiForSystem"));
+        if (fn) {
+            UINT dpi = fn();
+            if (dpi != 0) return dpi;
+        }
+    }
+    HDC hdc = GetDC(nullptr);
+    UINT dpi = hdc ? static_cast<UINT>(GetDeviceCaps(hdc, LOGPIXELSY)) : 96;
+    if (hdc) ReleaseDC(nullptr, hdc);
+    return dpi == 0 ? 96 : dpi;
+}
+
+static int scaleByDpi(int value96, UINT dpi) {
+    return MulDiv(value96, static_cast<int>(dpi), 96);
+}
+
+static void applyDarkTitleBar(HWND hwnd) {
+    HMODULE hDwm = LoadLibraryW(L"dwmapi.dll");
+    if (!hDwm) return;
+
+    using DwmSetWindowAttributeFn = HRESULT(WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
+    auto fn = reinterpret_cast<DwmSetWindowAttributeFn>(GetProcAddress(hDwm, "DwmSetWindowAttribute"));
+    if (fn) {
+        constexpr DWORD DWMWA_USE_IMMERSIVE_DARK_MODE_OLD = 19;
+        constexpr DWORD DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
+
+        BOOL enabled = TRUE;
+        fn(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &enabled, sizeof(enabled));
+        fn(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE_OLD, &enabled, sizeof(enabled));
+    }
+    FreeLibrary(hDwm);
+}
+
+static bool ensureDialogClassRegistered() {
+    static std::atomic<bool> registered{false};
+    if (registered.load()) return true;
+
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = [](HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) -> LRESULT {
+        auto* state = reinterpret_cast<DarkDialogState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+
+        auto layout = [&](DarkDialogState* s) {
+            if (!s) return;
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+
+            UINT dpi = queryWindowDpi(hwnd);
+
+            const int pad = scaleByDpi(BASE_PAD, dpi);
+            const int titleSpacing = scaleByDpi(BASE_TITLE_SPACING, dpi);
+            const int buttonTopGap = scaleByDpi(BASE_BUTTON_TOP_GAP, dpi);
+            const int buttonHeight = scaleByDpi(BASE_BUTTON_HEIGHT, dpi);
+            const int buttonGap = scaleByDpi(BASE_BUTTON_GAP, dpi);
+            const int bodyInset = scaleByDpi(2, dpi);
+
+            int titleHeight = scaleByDpi(BASE_TITLE_HEIGHT, dpi);
+            if (s->hwndTitle && s->titleFont) {
+                HDC hdc = GetDC(hwnd);
+                if (hdc) {
+                    HFONT old = (HFONT)SelectObject(hdc, s->titleFont);
+                    TEXTMETRICW tm{};
+                    if (GetTextMetricsW(hdc, &tm)) {
+                        titleHeight = std::max(titleHeight, static_cast<int>(tm.tmHeight) + scaleByDpi(6, dpi));
+                    }
+                    SelectObject(hdc, old);
+                    ReleaseDC(hwnd, hdc);
+                }
+            }
+
+            int buttonsTop = rc.bottom - pad - buttonHeight;
+            int bodyTop = pad + titleHeight + titleSpacing;
+            int bodyHeight = std::max(scaleByDpi(BASE_BODY_MIN_HEIGHT, dpi), buttonsTop - buttonTopGap - bodyTop);
+
+            if (s->hwndTitle) MoveWindow(s->hwndTitle, pad, pad, rc.right - pad * 2, titleHeight, TRUE);
+            int bodyX = pad + bodyInset;
+            int bodyW = std::max(scaleByDpi(220, dpi), static_cast<int>(rc.right - bodyX * 2));
+            s->bodyRect.left = bodyX;
+            s->bodyRect.top = bodyTop;
+            s->bodyRect.right = bodyX + bodyW;
+            s->bodyRect.bottom = bodyTop + bodyHeight;
+
+            if (!s->buttonHwnds.empty()) {
+                HDC hdc = GetDC(hwnd);
+                HFONT old = nullptr;
+                if (hdc && s->buttonFont) old = (HFONT)SelectObject(hdc, s->buttonFont);
+
+                std::vector<int> widths;
+                widths.reserve(s->buttonHwnds.size());
+                int totalWidth = 0;
+
+                for (HWND button : s->buttonHwnds) {
+                    wchar_t text[256]{};
+                    GetWindowTextW(button, text, 255);
+                    SIZE size{};
+                    if (hdc) GetTextExtentPoint32W(hdc, text, (int)wcslen(text), &size);
+                    int width = std::max(scaleByDpi(120, dpi), (int)size.cx + scaleByDpi(36, dpi));
+                    widths.push_back(width);
+                    totalWidth += width;
+                }
+
+                if (hdc) {
+                    if (old) SelectObject(hdc, old);
+                    ReleaseDC(hwnd, hdc);
+                }
+
+                totalWidth += (int)(s->buttonHwnds.size() - 1) * buttonGap;
+                int x = rc.right - pad - totalWidth;
+                int buttonRadius = scaleByDpi(10, dpi);
+
+                for (size_t i = 0; i < s->buttonHwnds.size(); i++) {
+                    MoveWindow(s->buttonHwnds[i], x, buttonsTop, widths[i], buttonHeight, TRUE);
+
+                    HRGN rgn = CreateRoundRectRgn(0, 0, widths[i], buttonHeight, buttonRadius * 2, buttonRadius * 2);
+                    SetWindowRgn(s->buttonHwnds[i], rgn, TRUE);
+
+                    x += widths[i] + buttonGap;
+                }
+            }
+
+            InvalidateRect(hwnd, nullptr, FALSE);
+        };
+
+        auto buttonExists = [&](DarkDialogState* s, int id) -> bool {
+            if (!s) return false;
+            for (HWND button : s->buttonHwnds) {
+                if ((int)GetDlgCtrlID(button) == id) return true;
+            }
+            return false;
+        };
+
+        switch (msg) {
+            case WM_NCCREATE: {
+                auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+                auto* st = reinterpret_cast<DarkDialogState*>(cs->lpCreateParams);
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(st));
+                return TRUE;
+            }
+
+            case WM_CREATE: {
+                if (!state) return -1;
+
+                state->titleFont = createUiFont(15, FW_SEMIBOLD);
+                state->bodyFont = createUiFont(11, FW_NORMAL);
+                state->buttonFont = createUiFont(11, FW_NORMAL);
+
+                state->bgBrush = CreateSolidBrush(COLOR_BG);
+                state->bodyBrush = CreateSolidBrush(COLOR_BODY_BG);
+
+                std::wstring heading = state->options.heading.empty()
+                    ? defaultHeadingForTone(state->options.tone)
+                    : state->options.heading;
+
+                state->hwndTitle = CreateWindowExW(
+                    0, L"STATIC", heading.c_str(),
+                    WS_CHILD | WS_VISIBLE | SS_LEFT,
+                    0, 0, 0, 0,
+                    hwnd, (HMENU)1001, GetModuleHandleW(nullptr), nullptr
+                );
+
+                if (state->hwndTitle && state->titleFont) {
+                    SendMessageW(state->hwndTitle, WM_SETFONT, (WPARAM)state->titleFont, TRUE);
+                }
+
+                if (state->hwndTitle) {
+                    SetWindowPos(state->hwndTitle, HWND_TOP, 0, 0, 0, 0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                }
+
+                for (auto& button : state->options.buttons) {
+                    DWORD style = WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW;
+
+                    HWND hwndButton = CreateWindowExW(
+                        0, L"BUTTON", button.label.c_str(), style,
+                        0, 0, 0, 0,
+                        hwnd, (HMENU)(INT_PTR)button.id, GetModuleHandleW(nullptr), nullptr
+                    );
+
+                    if (hwndButton && state->buttonFont) {
+                        SendMessageW(hwndButton, WM_SETFONT, (WPARAM)state->buttonFont, TRUE);
+                    }
+                    if (hwndButton) state->buttonHwnds.push_back(hwndButton);
+                    if (button.isDefault) state->defaultButtonId = button.id;
+                }
+
+                if (!buttonExists(state, state->defaultButtonId) && !state->buttonHwnds.empty()) {
+                    state->defaultButtonId = (int)GetDlgCtrlID(state->buttonHwnds[0]);
+                }
+
+                applyDarkTitleBar(hwnd);
+                layout(state);
+                return 0;
+            }
+
+            case WM_PAINT: {
+                PAINTSTRUCT ps{};
+                HDC hdc = BeginPaint(hwnd, &ps);
+                if (!hdc) return 0;
+
+                RECT client{};
+                GetClientRect(hwnd, &client);
+                FillRect(hdc, &client, state && state->bgBrush ? state->bgBrush : (HBRUSH)(COLOR_WINDOW + 1));
+
+                if (state) {
+                    UINT dpi = queryWindowDpi(hwnd);
+                    int bodyRadius = scaleByDpi(10, dpi);
+                    int bodyInnerPadX = scaleByDpi(10, dpi);
+                    int bodyInnerPadY = scaleByDpi(8, dpi);
+
+                    HBRUSH panelBrush = state->bodyBrush ? state->bodyBrush : CreateSolidBrush(COLOR_BODY_BG);
+                    HPEN panelPen = CreatePen(PS_SOLID, 1, COLOR_BODY_BORDER);
+                    HGDIOBJ oldBrush = SelectObject(hdc, panelBrush);
+                    HGDIOBJ oldPen = SelectObject(hdc, panelPen);
+
+                    RoundRect(hdc,
+                              state->bodyRect.left,
+                              state->bodyRect.top,
+                              state->bodyRect.right,
+                              state->bodyRect.bottom,
+                              bodyRadius,
+                              bodyRadius);
+
+                    SelectObject(hdc, oldBrush);
+                    SelectObject(hdc, oldPen);
+                    DeleteObject(panelPen);
+
+                    RECT textRect = state->bodyRect;
+                    InflateRect(&textRect, -bodyInnerPadX, -bodyInnerPadY);
+
+                    HFONT oldFont = nullptr;
+                    if (state->bodyFont) {
+                        oldFont = (HFONT)SelectObject(hdc, state->bodyFont);
+                    }
+                    SetBkMode(hdc, TRANSPARENT);
+                    SetTextColor(hdc, COLOR_MUTED_TEXT);
+                    DrawTextW(hdc,
+                              state->options.message.c_str(),
+                              -1,
+                              &textRect,
+                              DT_LEFT | DT_TOP | DT_WORDBREAK | DT_EDITCONTROL | DT_NOPREFIX | DT_EXPANDTABS);
+
+                    if (oldFont) SelectObject(hdc, oldFont);
+
+                    if (!state->bodyBrush) {
+                        DeleteObject(panelBrush);
+                    }
+                }
+
+                EndPaint(hwnd, &ps);
+                return 0;
+            }
+
+            case WM_SHOWWINDOW: {
+                if (wParam && state) {
+                    for (HWND button : state->buttonHwnds) {
+                        if ((int)GetDlgCtrlID(button) == state->defaultButtonId) {
+                            SetFocus(button);
+                            break;
+                        }
+                    }
+                }
+                break;
+            }
+
+            case WM_SIZE:
+                layout(state);
+                return 0;
+
+            case WM_COMMAND: {
+                if (HIWORD(wParam) == BN_CLICKED && state) {
+                    int id = LOWORD(wParam);
+                    if (buttonExists(state, id)) {
+                        state->result = id;
+                        DestroyWindow(hwnd);
+                        return 0;
+                    }
+                }
+                break;
+            }
+
+            case WM_CLOSE:
+                if (state) state->result = state->options.cancelResult;
+                DestroyWindow(hwnd);
+                return 0;
+
+            case WM_ERASEBKGND: {
+                RECT rc{};
+                GetClientRect(hwnd, &rc);
+                FillRect((HDC)wParam, &rc, state && state->bgBrush ? state->bgBrush : (HBRUSH)(COLOR_WINDOW + 1));
+                return 1;
+            }
+
+            case WM_CTLCOLORSTATIC: {
+                HDC hdc = (HDC)wParam;
+                HWND ctl = (HWND)lParam;
+                SetBkMode(hdc, TRANSPARENT);
+                SetBkColor(hdc, COLOR_BG);
+                COLORREF accent = state ? accentForTone(state->options.tone) : COLOR_TEXT;
+                SetTextColor(hdc, (state && ctl == state->hwndTitle) ? accent : COLOR_TEXT);
+                return (LRESULT)(state && state->bgBrush ? state->bgBrush : GetStockObject(DC_BRUSH));
+            }
+
+            case WM_CTLCOLOREDIT: {
+                HDC hdc = (HDC)wParam;
+                SetBkMode(hdc, OPAQUE);
+                SetBkColor(hdc, COLOR_BODY_BG);
+                SetTextColor(hdc, COLOR_MUTED_TEXT);
+                return (LRESULT)(state && state->bodyBrush ? state->bodyBrush : GetStockObject(WHITE_BRUSH));
+            }
+
+            case WM_DRAWITEM: {
+                auto* dis = reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
+                if (!dis || dis->CtlType != ODT_BUTTON) break;
+
+                bool disabled = (dis->itemState & ODS_DISABLED) != 0;
+                bool pressed = (dis->itemState & ODS_SELECTED) != 0;
+                bool hot = (dis->itemState & ODS_HOTLIGHT) != 0;
+                bool isDefault = state && ((int)GetDlgCtrlID(dis->hwndItem) == state->defaultButtonId);
+                UINT dpi = queryWindowDpi(hwnd);
+                int radius = scaleByDpi(10, dpi);
+
+                COLORREF borderColor = isDefault
+                    ? accentForTone(state ? state->options.tone : DialogTone::Info)
+                    : COLOR_BUTTON_BORDER;
+
+                COLORREF bg = pressed ? COLOR_BUTTON_BG_ACTIVE : (hot ? COLOR_BUTTON_BG_HOT : COLOR_BUTTON_BG);
+                RECT rcItem = dis->rcItem;
+                int width = rcItem.right - rcItem.left;
+                int height = rcItem.bottom - rcItem.top;
+
+                HDC memDc = CreateCompatibleDC(dis->hDC);
+                HBITMAP memBmp = CreateCompatibleBitmap(dis->hDC, width, height);
+                HGDIOBJ oldBmp = SelectObject(memDc, memBmp);
+
+                HBRUSH parentBg = CreateSolidBrush(COLOR_BG);
+                RECT memRect{0, 0, width, height};
+                FillRect(memDc, &memRect, parentBg);
+                DeleteObject(parentBg);
+
+                HBRUSH bgBrush = CreateSolidBrush(bg);
+                HPEN borderPen = CreatePen(PS_SOLID, 1, borderColor);
+                HGDIOBJ oldBrush = SelectObject(memDc, bgBrush);
+                HGDIOBJ oldPen = SelectObject(memDc, borderPen);
+                RoundRect(memDc, 0, 0, width, height, radius, radius);
+                SelectObject(memDc, oldBrush);
+                SelectObject(memDc, oldPen);
+                DeleteObject(bgBrush);
+                DeleteObject(borderPen);
+
+                wchar_t text[256]{};
+                GetWindowTextW(dis->hwndItem, text, 255);
+                SetBkMode(memDc, TRANSPARENT);
+                SetTextColor(memDc, disabled ? RGB(140, 140, 140) : COLOR_TEXT);
+
+                RECT textRc{0, 0, width, height};
+                DrawTextW(memDc, text, -1, &textRc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+                BitBlt(dis->hDC,
+                       rcItem.left,
+                       rcItem.top,
+                       width,
+                       height,
+                       memDc,
+                       0,
+                       0,
+                       SRCCOPY);
+
+                SelectObject(memDc, oldBmp);
+                DeleteObject(memBmp);
+                DeleteDC(memDc);
+                return TRUE;
+            }
+
+            case WM_NCDESTROY: {
+                if (state) {
+                    if (state->titleFont) DeleteObject(state->titleFont);
+                    if (state->bodyFont) DeleteObject(state->bodyFont);
+                    if (state->buttonFont) DeleteObject(state->buttonFont);
+                    if (state->bgBrush) DeleteObject(state->bgBrush);
+                    if (state->bodyBrush) DeleteObject(state->bodyBrush);
+                }
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                break;
+            }
+        }
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
+    };
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hbrBackground = nullptr;
+    wc.lpszClassName = DARK_DIALOG_CLASS;
+
+    if (!RegisterClassExW(&wc)) {
+        DWORD err = GetLastError();
+        if (err != ERROR_CLASS_ALREADY_EXISTS) {
+            return false;
+        }
+    }
+
+    registered.store(true);
+    return true;
+}
+
+static int estimateClientHeight(const std::wstring& message, int width96) {
+    UINT dpi = querySystemDpi();
+
+    int widthPx = scaleByDpi(width96, dpi);
+    int pad = scaleByDpi(BASE_PAD, dpi);
+    int bodyInset = scaleByDpi(4, dpi);
+    int textWidthPx = std::max(scaleByDpi(280, dpi), widthPx - (pad + bodyInset) * 2);
+
+    int measuredTextHeight = scaleByDpi(120, dpi);
+    HDC hdc = GetDC(nullptr);
+    HFONT font = createUiFont(12, FW_NORMAL);
+    if (hdc && font) {
+        HFONT old = (HFONT)SelectObject(hdc, font);
+        RECT rc{0, 0, textWidthPx, 0};
+        DrawTextW(hdc,
+              message.c_str(),
+              -1,
+              &rc,
+              DT_WORDBREAK | DT_CALCRECT | DT_NOPREFIX | DT_EXPANDTABS);
+        measuredTextHeight = std::max(scaleByDpi(72, dpi), static_cast<int>(rc.bottom - rc.top));
+        SelectObject(hdc, old);
+    }
+    if (font) DeleteObject(font);
+    if (hdc) ReleaseDC(nullptr, hdc);
+
+    int bodyHeight = std::clamp(measuredTextHeight + scaleByDpi(12, dpi),
+                                scaleByDpi(130, dpi),
+                                scaleByDpi(430, dpi));
+
+    return scaleByDpi(BASE_PAD + BASE_TITLE_HEIGHT + BASE_TITLE_SPACING, dpi)
+        + bodyHeight
+        + scaleByDpi(BASE_BUTTON_TOP_GAP + BASE_BUTTON_HEIGHT + BASE_PAD, dpi);
+}
+
+static std::wstring removeDuplicateHeading(const std::wstring& heading, const std::wstring& message) {
+    std::wstring normalizedHeading = trimW(heading);
+    if (normalizedHeading.empty() || message.empty()) return message;
+
+    size_t lineEnd = message.find_first_of(L"\r\n");
+    std::wstring firstLine = trimW(lineEnd == std::wstring::npos ? message : message.substr(0, lineEnd));
+    if (!iequalsW(firstLine, normalizedHeading)) return message;
+
+    if (lineEnd == std::wstring::npos) return L"";
+
+    size_t pos = lineEnd;
+    if (pos < message.size() && message[pos] == L'\r') ++pos;
+    if (pos < message.size() && message[pos] == L'\n') ++pos;
+
+    while (pos < message.size()) {
+        size_t nextEnd = message.find_first_of(L"\r\n", pos);
+        std::wstring line = trimW(nextEnd == std::wstring::npos ? message.substr(pos)
+                                                                 : message.substr(pos, nextEnd - pos));
+        if (!line.empty()) break;
+        if (nextEnd == std::wstring::npos) return L"";
+        pos = nextEnd;
+        if (pos < message.size() && message[pos] == L'\r') ++pos;
+        if (pos < message.size() && message[pos] == L'\n') ++pos;
+    }
+
+    return message.substr(pos);
+}
+
+static DWORD fallbackIconFlag(DialogTone tone) {
+    switch (tone) {
+        case DialogTone::Warning: return MB_ICONWARNING;
+        case DialogTone::Error: return MB_ICONERROR;
+        case DialogTone::Question: return MB_ICONQUESTION;
+        case DialogTone::Success:
+        case DialogTone::Info:
+        default: return MB_ICONINFORMATION;
+    }
+}
+
+static int fallbackMessageBox(const DialogOptions& options) {
+    DWORD flags = fallbackIconFlag(options.tone);
+    if (options.topMost) flags |= MB_TOPMOST;
+
+    if (options.buttons.size() == 2) {
+        int a = options.buttons[0].id;
+        int b = options.buttons[1].id;
+        if ((a == IDYES && b == IDNO) || (a == IDNO && b == IDYES)) flags |= MB_YESNO;
+        else if ((a == IDOK && b == IDCANCEL) || (a == IDCANCEL && b == IDOK)) flags |= MB_OKCANCEL;
+        else if ((a == IDRETRY && b == IDCANCEL) || (a == IDCANCEL && b == IDRETRY)) flags |= MB_RETRYCANCEL;
+        else flags |= MB_OK;
+    } else if (options.buttons.size() == 3) {
+        bool hasYes = false, hasNo = false, hasCancel = false;
+        for (const auto& b : options.buttons) {
+            hasYes |= b.id == IDYES;
+            hasNo |= b.id == IDNO;
+            hasCancel |= b.id == IDCANCEL;
+        }
+        flags |= (hasYes && hasNo && hasCancel) ? MB_YESNOCANCEL : MB_OK;
+    } else {
+        flags |= MB_OK;
+    }
+
+    return MessageBoxW(nullptr, options.message.c_str(), options.title.c_str(), flags);
+}
+
+static int showDialog(const DialogOptions& inOptions) {
+    DialogOptions options = inOptions;
+
+    if (options.heading.empty()) {
+        options.heading = defaultHeadingForTone(options.tone);
+    }
+    if (options.title.empty()) {
+        options.title = options.heading;
+    }
+
+    options.message = removeDuplicateHeading(options.heading, options.message);
+    options.message = normalizeCrLf(options.message);
+    if (options.buttons.empty()) {
+        options.buttons.push_back({IDOK, L"OK", true});
+        options.cancelResult = IDOK;
+    }
+
+    bool hasDefault = false;
+    for (const auto& b : options.buttons) {
+        if (b.isDefault) {
+            hasDefault = true;
+            break;
+        }
+    }
+    if (!hasDefault && !options.buttons.empty()) {
+        options.buttons[0].isDefault = true;
+    }
+
+    if (!ensureDialogClassRegistered()) {
+        return fallbackMessageBox(options);
+    }
+
+    UINT dpi = querySystemDpi();
+    int width96 = std::clamp(options.width <= 0 ? 700 : options.width, 520, 1040);
+    int width = std::clamp(scaleByDpi(width96, dpi), scaleByDpi(520, dpi), scaleByDpi(1400, dpi));
+    int clientHeight = estimateClientHeight(options.message, width96);
+
+    DWORD style = WS_CAPTION | WS_SYSMENU | WS_POPUP;
+    DWORD exStyle = WS_EX_DLGMODALFRAME | (options.topMost ? WS_EX_TOPMOST : 0);
+
+    RECT wr{0, 0, width, clientHeight};
+    AdjustWindowRectEx(&wr, style, FALSE, exStyle);
+    int winW = wr.right - wr.left;
+    int winH = wr.bottom - wr.top;
+
+    int screenW = GetSystemMetrics(SM_CXSCREEN);
+    int screenH = GetSystemMetrics(SM_CYSCREEN);
+    int x = std::max(0, (screenW - winW) / 2);
+    int y = std::max(0, (screenH - winH) / 2);
+
+    DarkDialogState state;
+    state.options = std::move(options);
+    state.result = state.options.cancelResult;
+
+    HWND hwnd = CreateWindowExW(
+        exStyle,
+        DARK_DIALOG_CLASS,
+        state.options.title.c_str(),
+        style,
+        x, y, winW, winH,
+        nullptr,
+        nullptr,
+        GetModuleHandleW(nullptr),
+        &state
+    );
+
+    if (!hwnd) {
+        return fallbackMessageBox(state.options);
+    }
+
+    SetWindowTextW(hwnd, state.options.title.c_str());
+
+    ShowWindow(hwnd, SW_SHOW);
+    UpdateWindow(hwnd);
+
+    MSG msg{};
+    while (IsWindow(hwnd) && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if ((msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN) &&
+            (msg.hwnd == hwnd || IsChild(hwnd, msg.hwnd))) {
+            if (msg.wParam == VK_ESCAPE) {
+                state.result = state.options.cancelResult;
+                DestroyWindow(hwnd);
+                continue;
+            }
+            if (msg.wParam == VK_RETURN) {
+                SendMessageW(hwnd, WM_COMMAND, MAKEWPARAM(state.defaultButtonId, BN_CLICKED), 0);
+                continue;
+            }
+        }
+
+        if (!IsDialogMessageW(hwnd, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+
+    return state.result;
+}
+
+static int showDialog(const std::wstring& title,
+                      const std::wstring& message,
+                      DialogTone tone,
+                      std::vector<DialogButton> buttons,
+                      int cancelResult,
+                      bool topMost = false,
+                      const std::wstring& heading = L"",
+                      int width = 700) {
+    DialogOptions options;
+    options.title = title;
+    options.heading = heading;
+    options.message = message;
+    options.tone = tone;
+    options.buttons = std::move(buttons);
+    options.cancelResult = cancelResult;
+    options.topMost = topMost;
+    options.width = width;
+    return showDialog(options);
+}
+
+} // namespace Ui
 
 // ============================================================================
 // Path utilities
@@ -321,26 +1132,106 @@ static bool isPathCoveredByExclusion(const std::wstring& exclusion, const std::w
 }
 
 // ============================================================================
+// Embedded resource loading
+// ============================================================================
+static bool loadEmbeddedResourceBytes(int resourceId, std::vector<uint8_t>& outData) {
+    outData.clear();
+    HMODULE module = GetModuleHandleW(nullptr);
+    if (!module) return false;
+
+    HRSRC hResInfo = FindResourceW(module, MAKEINTRESOURCEW(resourceId), RT_RCDATA);
+    if (!hResInfo) return false;
+
+    DWORD size = SizeofResource(module, hResInfo);
+    if (size == 0) return false;
+
+    HGLOBAL hResData = LoadResource(module, hResInfo);
+    if (!hResData) return false;
+
+    void* ptr = LockResource(hResData);
+    if (!ptr) return false;
+
+    const uint8_t* begin = static_cast<const uint8_t*>(ptr);
+    outData.assign(begin, begin + size);
+    return true;
+}
+
+static bool loadEmbeddedResourceText(int resourceId, std::string& outText) {
+    std::vector<uint8_t> data;
+    if (!loadEmbeddedResourceBytes(resourceId, data)) return false;
+
+    outText.assign(reinterpret_cast<const char*>(data.data()), data.size());
+    if (outText.size() >= 3 &&
+        static_cast<unsigned char>(outText[0]) == 0xEF &&
+        static_cast<unsigned char>(outText[1]) == 0xBB &&
+        static_cast<unsigned char>(outText[2]) == 0xBF) {
+        outText.erase(0, 3);
+    }
+    return true;
+}
+
+static std::vector<EmbeddedDllEntry> getEmbeddedDllEntries() {
+    std::vector<EmbeddedDllEntry> entries;
+    std::string manifest;
+    if (!loadEmbeddedResourceText(DLL_INDEX_RESOURCE_ID, manifest)) return entries;
+
+    std::set<std::string> seenNames;
+    std::istringstream in(manifest);
+    std::string line;
+    while (std::getline(in, line)) {
+        line = trim(line);
+        if (line.empty() || line[0] == '#') continue;
+        auto sep = line.find('|');
+        if (sep == std::string::npos) continue;
+
+        std::string resourceIdText = trim(line.substr(0, sep));
+        std::string fileName = trim(line.substr(sep + 1));
+        if (resourceIdText.empty() || fileName.empty()) continue;
+
+        int resourceId = 0;
+        try {
+            resourceId = std::stoi(resourceIdText);
+        } catch (...) {
+            continue;
+        }
+        if (resourceId <= 0) continue;
+
+        std::string fileNameLower = toLower(fileName);
+        if (!seenNames.insert(fileNameLower).second) continue;
+
+        entries.push_back({resourceId, fileName});
+    }
+
+    return entries;
+}
+
+// ============================================================================
 // Branding properties loader
 // ============================================================================
-static void loadBranding() {
-    fs::path propsFile = getExeDir() / L"branding.properties";
-    std::ifstream f(propsFile);
-    if (!f.is_open()) return;
+static void applyBrandingProperties(const std::string& propertiesContent) {
+    std::istringstream in(propertiesContent);
     std::string line;
-    while (std::getline(f, line)) {
+    while (std::getline(in, line)) {
         line = trim(line);
         if (line.empty() || line[0] == '#') continue;
         auto eq = line.find('=');
         if (eq == std::string::npos) continue;
+
         std::string key = trim(line.substr(0, eq));
         std::string val = trim(line.substr(eq + 1));
+
         if (key == "brand.name" && !val.empty())                g_projectName = val;
         else if (key == "brand.version" && !val.empty())        g_version = val;
         else if (key == "update.latestReleaseApiUrl")           g_updateApiUrl = val;
         else if (key == "update.releasesUrl")                   g_releasesUrl = val;
         else if (key == "update.assetNameRegex")                g_assetNameRegex = val;
     }
+}
+
+static void loadBranding() {
+    std::string embeddedProps;
+    if (!loadEmbeddedResourceText(BRANDING_RESOURCE_ID, embeddedProps)) return;
+    applyBrandingProperties(embeddedProps);
 }
 
 // ============================================================================
@@ -1525,8 +2416,19 @@ static bool maybeUpdateAndRescheduleWatcher(const fs::path& workingDir) {
         "Latest: v" + remoteVer + "\n\n"
         "Do you want to update now?\n"
         "(The game launch will be stopped so the update can be applied. You'll need to start the instance again.)");
-    int choice = MessageBoxW(nullptr, msg.c_str(), toWide(g_projectName + " — Update").c_str(),
-                             MB_YESNO | MB_ICONQUESTION | MB_TOPMOST);
+    int choice = Ui::showDialog(
+        toWide(g_projectName + " — Update"),
+        msg,
+        Ui::DialogTone::Question,
+        {
+            {IDYES, L"Update now", true},
+            {IDNO, L"Not now"}
+        },
+        IDNO,
+        true,
+        L"Update Available",
+        700
+    );
     if (choice != IDYES) {
         logMsg("[Updater] User declined update");
         return false;
@@ -1537,8 +2439,16 @@ static bool maybeUpdateAndRescheduleWatcher(const fs::path& workingDir) {
     Asset asset = chooseAsset(assets, g_assetNameRegex, stableExeName);
     if (asset.downloadUrl.empty()) {
         logMsg("[Updater] No matching .exe asset found");
-        MessageBoxW(nullptr, L"Update found, but no downloadable .exe asset was found in the release.",
-                    toWide(g_projectName + " Updater").c_str(), MB_OK | MB_ICONWARNING);
+        Ui::showDialog(
+            toWide(g_projectName + " Updater"),
+            L"Update found, but no downloadable .exe asset was found in the release.",
+            Ui::DialogTone::Warning,
+            {{IDOK, L"OK", true}},
+            IDOK,
+            true,
+            L"No Downloadable Asset",
+            680
+        );
         return false;
     }
 
@@ -1556,7 +2466,16 @@ static bool maybeUpdateAndRescheduleWatcher(const fs::path& workingDir) {
 
     if (!ok || !fs::exists(downloadedExe) || fs::file_size(downloadedExe) == 0) {
         logMsg("[Updater] Download failed");
-        MessageBoxW(nullptr, L"Update download failed.", toWide(g_projectName + " Updater").c_str(), MB_OK | MB_ICONERROR);
+        Ui::showDialog(
+            toWide(g_projectName + " Updater"),
+            L"Update download failed.",
+            Ui::DialogTone::Error,
+            {{IDOK, L"OK", true}},
+            IDOK,
+            true,
+            L"Download Failed",
+            640
+        );
         return false;
     }
 
@@ -1576,35 +2495,32 @@ static bool maybeUpdateAndRescheduleWatcher(const fs::path& workingDir) {
 // ============================================================================
 
 /**
- * Get list of DLLs from the dlls/ folder next to the EXE.
- */
-static std::vector<fs::path> getBundledDlls() {
-    std::vector<fs::path> dlls;
-    fs::path dllDir = getExeDir() / L"dlls";
-    if (!fs::exists(dllDir)) return dlls;
-    for (auto& entry : fs::directory_iterator(dllDir)) {
-        if (entry.is_regular_file() && iequalsW(entry.path().extension().wstring(), L".dll"))
-            dlls.push_back(entry.path());
-    }
-    return dlls;
-}
-
-/**
- * Copy DLLs from the bundled dlls/ folder to the persistent extraction directory.
+ * Copy embedded DLL resources to the persistent extraction directory.
  */
 static std::vector<fs::path> copyDllsToPersistentDir() {
     std::vector<fs::path> result;
     fs::path destDir = getPreferredPersistentDllDir();
     fs::create_directories(destDir);
 
-    auto bundled = getBundledDlls();
-    for (auto& src : bundled) {
-        fs::path dest = destDir / src.filename();
+    auto bundled = getEmbeddedDllEntries();
+    for (auto& entry : bundled) {
+        std::vector<uint8_t> data;
+        if (!loadEmbeddedResourceBytes(entry.resourceId, data)) {
+            logMsg("[DLL] Missing embedded resource for " + entry.fileName);
+            continue;
+        }
+
+        fs::path dest = destDir / toWide(entry.fileName);
         try {
-            fs::copy_file(src, dest, fs::copy_options::overwrite_existing);
+            std::ofstream out(dest, std::ios::binary | std::ios::trunc);
+            if (!out.is_open()) throw std::runtime_error("Unable to open destination file");
+            if (!data.empty()) {
+                out.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+            }
+            if (!out.good()) throw std::runtime_error("Failed while writing destination file");
             result.push_back(dest);
         } catch (const std::exception& e) {
-            logMsg("[DLL] Failed to copy " + src.filename().string() + ": " + e.what());
+            logMsg("[DLL] Failed to extract " + entry.fileName + ": " + e.what());
         }
     }
     return result;
@@ -1934,13 +2850,18 @@ static int runInfoMode() {
     std::cout << "Bundled DLLs:" << std::endl;
     std::cout << "-------------------------------------------" << std::endl;
 
-    auto dlls = getBundledDlls();
+    auto dlls = getEmbeddedDllEntries();
     for (auto& dll : dlls) {
-        std::ifstream f(dll, std::ios::binary);
-        std::vector<uint8_t> data((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        std::vector<uint8_t> data;
+        if (!loadEmbeddedResourceBytes(dll.resourceId, data)) {
+            std::cout << std::endl;
+            std::cout << "  Name:   " << dll.fileName << std::endl;
+            std::cout << "  Error:  missing embedded resource" << std::endl;
+            continue;
+        }
         std::string hash = computeSha512(data);
         std::cout << std::endl;
-        std::cout << "  Name:   " << dll.filename().string() << std::endl;
+        std::cout << "  Name:   " << dll.fileName << std::endl;
         std::cout << "  Size:   " << data.size() << " bytes" << std::endl;
         std::cout << "  SHA512: " << hash << std::endl;
     }
@@ -2154,12 +3075,18 @@ static int runLauncherMode(int argc, wchar_t* argv[]) {
         logMsg("[Updater] Starting update check...");
         bool updateScheduled = Updater::maybeUpdateAndRescheduleWatcher(workingDir);
         if (updateScheduled) {
-            MessageBoxW(nullptr,
+            Ui::showDialog(
+                toWide(g_projectName + " — Restart Required"),
                 toWide("UPDATE INSTALLED\n\nPlease start the instance again.\n\n"
                        + g_projectName + " updated itself. The game launch was stopped so the updated EXE can be applied safely.\n\n"
-                       "Close this message, then click Play / Launch again in your launcher.").c_str(),
-                toWide(g_projectName + " — Restart Required").c_str(),
-                MB_OK | MB_ICONINFORMATION | MB_TOPMOST);
+                       "Close this message, then click Play / Launch again in your launcher."),
+                Ui::DialogTone::Success,
+                {{IDOK, L"OK", true}},
+                IDOK,
+                true,
+                L"Update Installed",
+                760
+            );
             return 1;
         }
     } catch (...) {
@@ -2220,9 +3147,17 @@ static int runInstallMode() {
             fs::copy_file(exePath, stableExe, fs::copy_options::overwrite_existing);
             exeFilename = stableFilename;
         } catch (const std::exception& e) {
-            MessageBoxW(nullptr, toWide("Failed to create/replace " + toUtf8(stableFilename)
-                + " next to the current EXE.\n\nReason: " + e.what()).c_str(),
-                toWide(g_projectName + " — Error").c_str(), MB_OK | MB_ICONERROR);
+            Ui::showDialog(
+                toWide(g_projectName + " — Error"),
+                toWide("Failed to create/replace " + toUtf8(stableFilename)
+                    + " next to the current EXE.\n\nReason: " + e.what()),
+                Ui::DialogTone::Error,
+                {{IDOK, L"Exit", true}},
+                IDOK,
+                true,
+                L"Setup Failed",
+                760
+            );
             return 1;
         }
     }
@@ -2230,7 +3165,8 @@ static int runInstallMode() {
     // Check Smart App Control
     auto sacState = getSmartAppControlState();
     if (sacState == SmartAppControlState::ENABLED) {
-        int choice = MessageBoxW(nullptr,
+        int choice = Ui::showDialog(
+            toWide(g_projectName + " — Smart App Control"),
             L"Windows Smart App Control is currently ENABLED and will block the injected DLLs.\n\n"
             L"Smart App Control does not support exclusions — it must be disabled entirely.\n\n"
             L"Steps to disable:\n"
@@ -2238,14 +3174,30 @@ static int runInstallMode() {
             L"2. Go to App & browser control\n"
             L"3. Under Smart App Control, click Settings\n"
             L"4. Select Off\n\n"
-            L"Click Retry after disabling, or Cancel to exit.",
-            toWide(g_projectName + " — Smart App Control").c_str(),
-            MB_RETRYCANCEL | MB_ICONWARNING);
+            L"Click I've disabled it after turning it off, or Exit to cancel setup.",
+            Ui::DialogTone::Warning,
+            {
+                {IDRETRY, L"I've disabled it", true},
+                {IDCANCEL, L"Exit"}
+            },
+            IDCANCEL,
+            true,
+            L"Smart App Control Is Enabled",
+            760
+        );
         if (choice == IDCANCEL) return 1;
         // Re-check
         if (getSmartAppControlState() == SmartAppControlState::ENABLED) {
-            MessageBoxW(nullptr, L"Smart App Control still appears to be enabled.\nPlease disable it and try again.",
-                       toWide(g_projectName).c_str(), MB_OK | MB_ICONWARNING);
+            Ui::showDialog(
+                toWide(g_projectName),
+                L"Smart App Control still appears to be enabled.\nPlease disable it and try again.",
+                Ui::DialogTone::Warning,
+                {{IDOK, L"Exit", true}},
+                IDOK,
+                true,
+                L"Still Enabled",
+                640
+            );
             return 1;
         }
     }
@@ -2255,8 +3207,16 @@ static int runInstallMode() {
     try { fs::create_directories(persistentDllDir); } catch (...) {}
 
     if (!fs::exists(persistentDllDir)) {
-        MessageBoxW(nullptr, toWide("Could not create DLL folder:\n" + persistentDllDir.string()).c_str(),
-                   toWide(g_projectName + " — Error").c_str(), MB_OK | MB_ICONERROR);
+        Ui::showDialog(
+            toWide(g_projectName + " — Error"),
+            toWide("Could not create DLL folder:\n" + persistentDllDir.string()),
+            Ui::DialogTone::Error,
+            {{IDOK, L"Exit", true}},
+            IDOK,
+            true,
+            L"Setup Failed",
+            760
+        );
         return 1;
     }
 
@@ -2265,21 +3225,32 @@ static int runInstallMode() {
     bool exeExcluded = Defender::isExclusionPresent(stableExe.wstring());
 
     if (!folderExcluded || !exeExcluded) {
-        int consent = MessageBoxW(nullptr,
+        int consent = Ui::showDialog(
+            toWide(g_projectName + " v" + g_version + " — Defender Exclusion"),
             toWide("Windows Defender Exclusion Needed\n\n"
                    "This installer needs to add exclusions so Windows Defender does not quarantine the injected DLLs.\n\n"
                    "Folder:\n" + persistentDllDir.string() + "\n\n"
                    "EXE:\n" + stableExe.string() + "\n\n"
                    "A UAC prompt may appear. Click Yes to add the exclusion.\n\n"
-                   "Click Yes to continue, No to skip (not recommended), or Cancel to exit.").c_str(),
-            toWide(g_projectName + " v" + g_version + " — Defender Exclusion").c_str(),
-            MB_YESNOCANCEL | MB_ICONINFORMATION);
+                   "Choose Continue to add exclusions, Skip to continue without them, or Exit."),
+            Ui::DialogTone::Question,
+            {
+                {IDYES, L"Continue", true},
+                {IDNO, L"Skip (not recommended)"},
+                {IDCANCEL, L"Exit"}
+            },
+            IDCANCEL,
+            true,
+            L"Windows Defender Exclusion Needed",
+            820
+        );
 
         if (consent == IDCANCEL) return 1;
         if (consent == IDYES) {
             auto result = Defender::ensureExclusionWithSingleUac(persistentDllDir, stableExe);
             if (!result.success) {
-                int manual = MessageBoxW(nullptr,
+                int manual = Ui::showDialog(
+                    toWide(g_projectName + " — Defender Exclusion Required"),
                     toWide("Could not add Defender exclusion automatically.\n\n"
                            "Please manually add this folder to Windows Defender exclusions:\n"
                            + persistentDllDir.string() + "\n\n"
@@ -2290,9 +3261,17 @@ static int runInstallMode() {
                            "4. Click Add an exclusion > Folder\n"
                            "5. Select the folder above\n\n"
                            "Details: " + result.details + "\n\n"
-                           "Click OK to continue anyway, or Cancel to exit.").c_str(),
-                    toWide(g_projectName + " — Defender Exclusion Required").c_str(),
-                    MB_OKCANCEL | MB_ICONWARNING);
+                           "Click Continue anyway to proceed, or Exit to cancel setup."),
+                    Ui::DialogTone::Warning,
+                    {
+                        {IDOK, L"Continue anyway", true},
+                        {IDCANCEL, L"Exit"}
+                    },
+                    IDCANCEL,
+                    true,
+                    L"Manual Action Required",
+                    860
+                );
                 if (manual == IDCANCEL) return 1;
             }
         }
@@ -2323,17 +3302,31 @@ static int runInstallMode() {
         auto result = InstanceConfig::installPreLaunchCommandCfg(cfgFile, prelaunchCmd);
         if (result.success) {
             InstanceConfig::ensurePrelaunchTxtExists(instanceDir);
-            MessageBoxW(nullptr,
+            Ui::showDialog(
+                toWide(g_projectName + " v" + g_version + " — Installed"),
                 toWide(g_projectName + " has been configured for this instance.\n\n"
                        "Instance: " + instanceDir.filename().string() + "\n"
                        "Path: " + instanceDir.string() + "\n\n"
-                       "You can now launch Minecraft from your launcher.").c_str(),
-                toWide(g_projectName + " v" + g_version + " — Installed").c_str(),
-                MB_OK | MB_ICONINFORMATION);
+                       "You can now launch Minecraft from your launcher."),
+                Ui::DialogTone::Success,
+                {{IDOK, L"Done", true}},
+                IDOK,
+                true,
+                L"Installation Complete",
+                760
+            );
             InstanceConfig::restartLaunchers();
         } else {
-            MessageBoxW(nullptr, toWide("Installation failed:\n" + result.error).c_str(),
-                       toWide(g_projectName + " — Error").c_str(), MB_OK | MB_ICONERROR);
+            Ui::showDialog(
+                toWide(g_projectName + " — Error"),
+                toWide("Installation failed:\n" + result.error),
+                Ui::DialogTone::Error,
+                {{IDOK, L"Exit", true}},
+                IDOK,
+                true,
+                L"Installation Failed",
+                760
+            );
             InstanceConfig::restartLaunchers();
         }
     } else if (fs::exists(jsonFile)) {
@@ -2341,28 +3334,48 @@ static int runInstallMode() {
         auto result = InstanceConfig::installPreLaunchCommandJson(jsonFile, atlCmd);
         if (result.success) {
             InstanceConfig::ensurePrelaunchTxtExists(instanceDir);
-            MessageBoxW(nullptr,
+            Ui::showDialog(
+                toWide(g_projectName + " v" + g_version + " — Installed"),
                 toWide(g_projectName + " has been configured for this instance.\n\n"
                        "Instance: " + instanceDir.filename().string() + "\n"
                        "Path: " + instanceDir.string() + "\n\n"
-                       "You can now launch Minecraft from your launcher.").c_str(),
-                toWide(g_projectName + " v" + g_version + " — Installed").c_str(),
-                MB_OK | MB_ICONINFORMATION);
+                       "You can now launch Minecraft from your launcher."),
+                Ui::DialogTone::Success,
+                {{IDOK, L"Done", true}},
+                IDOK,
+                true,
+                L"Installation Complete",
+                760
+            );
         } else {
-            MessageBoxW(nullptr, toWide("Installation failed:\n" + result.error).c_str(),
-                       toWide(g_projectName + " — Error").c_str(), MB_OK | MB_ICONERROR);
+            Ui::showDialog(
+                toWide(g_projectName + " — Error"),
+                toWide("Installation failed:\n" + result.error),
+                Ui::DialogTone::Error,
+                {{IDOK, L"Exit", true}},
+                IDOK,
+                true,
+                L"Installation Failed",
+                760
+            );
         }
     } else {
-        MessageBoxW(nullptr,
+        Ui::showDialog(
+            toWide(g_projectName + " v" + g_version + " — Setup Required"),
             toWide("To install " + g_projectName + ":\n\n"
                    "1. Open your instance folder:\n"
                    "   - MultiMC: Right-click instance > Instance Folder\n"
                    "   - Prism: Right-click instance > Folder\n"
                    "   - ATLauncher: Right-click instance > Open Folder\n\n"
                    "2. Drop this EXE into that folder.\n\n"
-                   "3. Double-click this EXE in that folder to install.").c_str(),
-            toWide(g_projectName + " v" + g_version + " — Setup Required").c_str(),
-            MB_OK | MB_ICONINFORMATION);
+                   "3. Double-click this EXE in that folder to install."),
+            Ui::DialogTone::Info,
+            {{IDOK, L"OK", true}},
+            IDOK,
+            true,
+            L"Setup Required",
+            760
+        );
     }
 
     return 0;
@@ -2383,6 +3396,8 @@ static int runDefenderElevatedEnsureMode(int argc, wchar_t* argv[]) {
 // Entry point
 // ============================================================================
 int wmain(int argc, wchar_t* argv[]) {
+    enableHighDpiAwareness();
+
     // Load branding
     loadBranding();
 

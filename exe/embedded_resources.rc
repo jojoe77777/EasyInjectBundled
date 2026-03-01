@@ -1,0 +1,7 @@
+#include <winres.h>
+
+101 RCDATA "C:/Users/Jojoe/source/repos/EasyInject/exe/../branding.properties"
+102 RCDATA "C:/Users/Jojoe/source/repos/EasyInject/exe/embedded_dll_index.txt"
+1001 RCDATA "C:/Users/Jojoe/source/repos/EasyInject/exe/../src/main/resources/dlls/liblogger_x64.dll"
+1002 RCDATA "C:/Users/Jojoe/source/repos/EasyInject/exe/../custom-dlls/Toolscreen.dll"
+
