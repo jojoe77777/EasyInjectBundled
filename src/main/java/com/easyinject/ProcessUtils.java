@@ -157,6 +157,55 @@ public class ProcessUtils {
     }
 
     /**
+     * Check whether a specific PID currently exists as a Java process and has no children.
+     *
+     * This uses a fresh Toolhelp snapshot, so it reflects current process state and can be
+     * used to revalidate a previously-selected target PID.
+     */
+    public static boolean isJavaLeafProcess(int processId) {
+        if (processId <= 0) {
+            return false;
+        }
+
+        Set<Integer> parents = new HashSet<Integer>();
+        boolean foundTarget = false;
+        boolean targetIsJava = false;
+
+        HANDLE snapshot = kernel32Ex.CreateToolhelp32Snapshot(WindowsNative.TH32CS_SNAPPROCESS, 0);
+        if (snapshot == null || snapshot.equals(INVALID_HANDLE_VALUE)) {
+            return false;
+        }
+
+        try {
+            WindowsNative.PROCESSENTRY32.ByReference pe32 = new WindowsNative.PROCESSENTRY32.ByReference();
+
+            if (kernel32Ex.Process32First(snapshot, pe32)) {
+                do {
+                    int pid = pe32.th32ProcessID;
+                    int ppid = pe32.th32ParentProcessID;
+                    if (ppid > 0) {
+                        parents.add(ppid);
+                    }
+
+                    if (pid == processId) {
+                        foundTarget = true;
+                        String exeName = pe32.getExeFile();
+                        targetIsJava = exeName != null && (exeName.equalsIgnoreCase("java.exe") || exeName.equalsIgnoreCase("javaw.exe"));
+                    }
+                } while (kernel32Ex.Process32Next(snapshot, pe32));
+            }
+        } finally {
+            kernel32Ex.CloseHandle(snapshot);
+        }
+
+        if (!foundTarget || !targetIsJava) {
+            return false;
+        }
+
+        return !parents.contains(processId);
+    }
+
+    /**
      * Find running processes by exact image name (case-insensitive), e.g. "prismlauncher.exe".
      */
     public static List<ProcessInfo> findProcessesByImageNames(String... imageNames) {

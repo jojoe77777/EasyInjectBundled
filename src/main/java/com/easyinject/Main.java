@@ -70,6 +70,7 @@ public class Main {
     private static final String LOGGER_DLL_NAME = "liblogger_x64.dll";
     private static final String LOG_FILE = "injector.log";
     private static final int POLL_INTERVAL_MS = 500;
+    private static final int TARGET_LEAF_RECHECK_INTERVAL_MS = 2000;
     private static final int TIMEOUT_SECONDS = 60;
     
     private static PrintWriter logWriter = null;
@@ -210,6 +211,10 @@ public class Main {
                 "Please run this from a JAR file (not from an IDE/classpath) and try again.");
             return;
         }
+
+        // Check for Smart App Control FIRST - it blocks unsigned DLLs and cannot be bypassed with exclusions.
+        // This must be checked before Defender exclusions since SAC takes precedence over Defender.
+        checkAndWarnAboutSmartAppControl();
 
         // Prepare persistent DLL directory + Defender exclusion (may trigger UAC)
         // This must be based on the stable launcher jar (e.g. Toolscreen.jar).
@@ -796,6 +801,276 @@ public class Main {
         }
     }
 
+    /**
+     * Smart App Control state enumeration.
+     * SAC is a Windows 11 feature that blocks unsigned/unsigned apps and DLLs.
+     * Unlike Windows Defender, SAC does NOT support exclusions - it must be disabled entirely.
+     */
+    private enum SmartAppControlState {
+        /** SAC is enabled and actively blocking unsigned apps */
+        ENABLED,
+        /** SAC is in evaluation mode (still learning, may or may not block) */
+        EVALUATION,
+        /** SAC is disabled */
+        DISABLED,
+        /** Unable to determine SAC state (older Windows, registry inaccessible, etc.) */
+        UNKNOWN
+    }
+
+    /**
+     * Detect Smart App Control state via registry.
+     * Registry path: HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy
+     * Value: VerifiedAndReputablePolicyState
+     *   0 = Disabled
+     *   1 = Enabled (Enforcement mode - blocks unsigned apps)
+     *   2 = Evaluation mode (learning phase, may still block)
+     * 
+     * SAC is only available on Windows 11 22H2+. On older Windows, this returns UNKNOWN.
+     */
+    private static SmartAppControlState getSmartAppControlState() {
+        if (!isWindows()) {
+            return SmartAppControlState.UNKNOWN;
+        }
+        try {
+            // Check the CI (Code Integrity) policy registry key
+            ExecResult q = execCommandCapture(new String[] {
+                getRegExePath(), "query",
+                "HKLM\\SYSTEM\\CurrentControlSet\\Control\\CI\\Policy",
+                "/v", "VerifiedAndReputablePolicyState"
+            });
+            if (q.exitCode != 0 || q.output == null) {
+                // Key doesn't exist - likely older Windows without SAC
+                return SmartAppControlState.UNKNOWN;
+            }
+
+            // Output typically contains: VerifiedAndReputablePolicyState    REG_DWORD    0x1
+            String out = q.output;
+            String lower = out.toLowerCase();
+            int idx = lower.indexOf("0x");
+            if (idx >= 0) {
+                int end = idx + 2;
+                while (end < out.length()) {
+                    char c = out.charAt(end);
+                    boolean hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+                    if (!hex) {
+                        break;
+                    }
+                    end++;
+                }
+                String hex = out.substring(idx + 2, end);
+                if (!hex.isEmpty()) {
+                    int value = Integer.parseInt(hex, 16);
+                    if (value == 0) {
+                        return SmartAppControlState.DISABLED;
+                    } else if (value == 1) {
+                        return SmartAppControlState.ENABLED;
+                    } else if (value == 2) {
+                        return SmartAppControlState.EVALUATION;
+                    }
+                }
+            }
+
+            // Fallback: try to parse the last integer-ish token
+            String[] tokens = out.trim().split("\\s+");
+            for (int i = tokens.length - 1; i >= 0; i--) {
+                try {
+                    int value;
+                    if (tokens[i].startsWith("0x") || tokens[i].startsWith("0X")) {
+                        value = Integer.parseInt(tokens[i].substring(2), 16);
+                    } else {
+                        value = Integer.parseInt(tokens[i]);
+                    }
+                    if (value == 0) {
+                        return SmartAppControlState.DISABLED;
+                    } else if (value == 1) {
+                        return SmartAppControlState.ENABLED;
+                    } else if (value == 2) {
+                        return SmartAppControlState.EVALUATION;
+                    }
+                } catch (Exception ignored) {
+                    // keep scanning
+                }
+            }
+            return SmartAppControlState.UNKNOWN;
+        } catch (Throwable ignored) {
+            return SmartAppControlState.UNKNOWN;
+        }
+    }
+
+    /**
+     * Check if Smart App Control is enabled or in evaluation mode.
+     * Returns true if SAC might block unsigned DLLs.
+     */
+    private static boolean isSmartAppControlBlocking() {
+        SmartAppControlState state = getSmartAppControlState();
+        return state == SmartAppControlState.ENABLED || state == SmartAppControlState.EVALUATION;
+    }
+
+    /**
+     * Check for Smart App Control and guide user through disabling it if enabled.
+     * This is called during installation before Defender exclusion setup.
+     * SAC blocks unsigned DLLs and cannot be bypassed with exclusions like Defender.
+     */
+    private static void checkAndWarnAboutSmartAppControl() {
+        if (!isWindows()) {
+            return;
+        }
+
+        SmartAppControlState state = getSmartAppControlState();
+        log("Smart App Control state: " + state);
+
+        // Only block if SAC is actively enabled (not evaluation or unknown)
+        // Evaluation mode is less strict and may allow the DLLs
+        if (state != SmartAppControlState.ENABLED) {
+            return;
+        }
+
+        // SAC is enabled - show warning and guide user to disable it
+        guideUserThroughDisablingSmartAppControl();
+    }
+
+    /**
+     * Show a dialog guiding the user through disabling Smart App Control.
+     * This method loops until SAC is disabled or the user exits.
+     */
+    private static void guideUserThroughDisablingSmartAppControl() {
+        while (true) {
+            SmartAppControlState state = getSmartAppControlState();
+            if (state != SmartAppControlState.ENABLED && state != SmartAppControlState.EVALUATION) {
+                // SAC is now disabled or unknown (user may have disabled it)
+                return;
+            }
+
+            int action = showSmartAppControlWarningDialog(state);
+            // -1 = window closed (X) => exit installer
+            // 0 = "I've disabled it" => re-check
+            // 1 = "Open Windows Security" => open settings and re-check
+            // 2 = "Exit" => exit installer
+            if (action == -1 || action == 2) {
+                System.exit(1);
+                return;
+            }
+
+            if (action == 1) {
+                openWindowsSecuritySmartAppControlUi();
+            } else if (action == 0) {
+                // User claims to have disabled it - verify
+                state = getSmartAppControlState();
+                if (state != SmartAppControlState.ENABLED && state != SmartAppControlState.EVALUATION) {
+                    return;
+                }
+                // Still enabled - show warning that we couldn't verify
+                showNonFatalWarningDialog(
+                    "Smart App Control still appears to be enabled.\n\n" +
+                    "Please make sure to:\n" +
+                    "1. Go to Windows Security > App & browser control\n" +
+                    "2. Under 'Smart App Control', click 'Settings'\n" +
+                    "3. Select 'Off'\n\n" +
+                    "If you've already turned it off, click 'I've disabled it' again."
+                );
+            }
+
+            sleep(500);
+        }
+    }
+
+    /**
+     * Show the Smart App Control warning dialog.
+     * @return -1 (closed), 0 (I've disabled it), 1 (Open Windows Security), 2 (Exit)
+     */
+    private static int showSmartAppControlWarningDialog(SmartAppControlState state) {
+        try {
+            applyDarkTheme();
+
+            StringBuilder body = new StringBuilder();
+            body.append("<html><body style='width: 450px; font-family: Segoe UI, sans-serif; color: #e0e0e0;'>");
+            body.append("<p style='margin:0 0 10px 0; color: #FF5252; font-size: 15px;'><b>⚠ Smart App Control is Enabled</b></p>");
+            body.append("<p style='margin:0 0 10px 0;'>");
+            body.append("Windows Smart App Control is currently <b>enabled</b> and will block the injected DLLs used by ");
+            body.append(escapeHtml(PROJECT_NAME));
+            body.append(".");
+            body.append("</p>");
+            body.append("<p style='margin:0 0 10px 0;'>");
+            body.append("<b>Smart App Control does not support exclusions</b> — it must be disabled entirely for this program to work.");
+            body.append("</p>");
+            body.append("<p style='margin:0 0 10px 0; color:#c7ced6;'>");
+            body.append("Current state: <b>");
+            if (state == SmartAppControlState.ENABLED) {
+                body.append("<span style='color:#FF5252;'>Enabled (Blocking)</span>");
+            } else if (state == SmartAppControlState.EVALUATION) {
+                body.append("<span style='color:#FFB300;'>Evaluation Mode</span>");
+            } else {
+                body.append(state);
+            }
+            body.append("</b></p>");
+            body.append("<p style='margin:0 0 10px 0; color:#9e9e9e; font-size: 12px;'>");
+            body.append("<b>How to disable Smart App Control:</b>");
+            body.append("</p>");
+            body.append("<ol style='margin:0 0 10px 0; padding-left:20px; color:#c7ced6; font-size: 12px;'>");
+            body.append("<li>Open <b>Windows Security</b> (click below or search in Start)</li>");
+            body.append("<li>Go to <b>App &amp; browser control</b></li>");
+            body.append("<li>Under <b>Smart App Control</b>, click <b>Settings</b></li>");
+            body.append("<li>Select <b>Off</b></li>");
+            body.append("</ol>");
+            body.append("<p style='margin:0 0 10px 0; color:#9e9e9e; font-size: 11px;'>");
+            body.append("Note: Smart App Control is a Windows 11 feature. If you don't see it, you may be on an older version.");
+            body.append("</p>");
+            body.append("</body></html>");
+
+            javax.swing.JLabel msgLabel = new javax.swing.JLabel(body.toString());
+            javax.swing.JButton btnDisabled = createStyledButton("I've disabled it");
+            javax.swing.JButton btnOpen = createStyledButton("Open Windows Security");
+            javax.swing.JButton btnExit = createStyledButton("Exit");
+
+            Object[] options = new Object[] { btnDisabled, btnOpen, btnExit };
+
+            return showBlockingOptionDialog(
+                PROJECT_NAME + " v" + VERSION + " — Smart App Control",
+                msgLabel,
+                options,
+                0
+            );
+        } catch (Throwable t) {
+            // Fallback to console
+            System.out.println("=======================================================");
+            System.out.println("  Smart App Control is Enabled");
+            System.out.println("=======================================================");
+            System.out.println();
+            System.out.println("Smart App Control is blocking unsigned DLLs.");
+            System.out.println("Please disable it in Windows Security:");
+            System.out.println("  1. Open Windows Security");
+            System.out.println("  2. Go to App & browser control");
+            System.out.println("  3. Under Smart App Control, click Settings");
+            System.out.println("  4. Select Off");
+            System.out.println();
+            System.out.println("Then run this installer again.");
+            return 2; // Exit
+        }
+    }
+
+    /**
+     * Open Windows Security to the App & browser control page where Smart App Control settings are located.
+     */
+    private static void openWindowsSecuritySmartAppControlUi() {
+        // Best effort - try multiple approaches
+        try {
+            // Try the windowsdefender URI scheme
+            new ProcessBuilder("cmd", "/C", "start", "", "windowsdefender:").start();
+            return;
+        } catch (Throwable ignored) {}
+
+        try {
+            // Try ms-settings for App & browser control
+            new ProcessBuilder("cmd", "/C", "start", "", "ms-settings:windowsdefender-appbrowser").start();
+            return;
+        } catch (Throwable ignored) {}
+
+        try {
+            // Fallback to generic Windows Security
+            new ProcessBuilder("cmd", "/C", "start", "", "ms-settings:windowsdefender").start();
+        } catch (Throwable ignored) {}
+    }
+
     private static void showFatalWarningDialogAndExit(String warning) {
         try {
             applyDarkTheme();
@@ -842,12 +1117,6 @@ public class Main {
             if (warning != null && !warning.trim().isEmpty()) {
                 System.out.println(warning);
                 System.out.println();
-            }
-            System.out.println("Press Enter to exit...");
-            try {
-                System.in.read();
-            } catch (Exception ignored2) {
-                // ignore
             }
         }
 
@@ -3329,11 +3598,6 @@ public class Main {
             System.out.println();
             System.out.println("PreLaunchCommand has been configured.");
             System.out.println("You can now launch Minecraft from your launcher.");
-            System.out.println();
-            System.out.println("Press Enter to exit...");
-            try {
-                System.in.read();
-            } catch (Exception ignored) {}
             restartSavedLaunchersAfterConfirmation();
         }
     }
@@ -3382,11 +3646,6 @@ public class Main {
             System.out.println("=======================================================");
             System.out.println();
             System.out.println("Error: " + error);
-            System.out.println();
-            System.out.println("Press Enter to exit...");
-            try {
-                System.in.read();
-            } catch (Exception ignored) {}
             restartSavedLaunchersAfterConfirmation();
         }
     }
@@ -3584,10 +3843,6 @@ public class Main {
                 "2. Drop this JAR file into that folder.\n\n" +
                 "3. Double-click this JAR file in that folder to install.\n";
             System.out.println(consoleMsg);
-            System.out.println("Press Enter to exit...");
-            try {
-                System.in.read();
-            } catch (Exception ignored) {}
         }
     }
 
@@ -3828,12 +4083,6 @@ public class Main {
             System.out.println("" + PROJECT_NAME + " updated itself.");
             System.out.println("Start the instance again in your launcher.");
             System.out.println();
-            try {
-                System.out.println("Press Enter to close...");
-                System.in.read();
-            } catch (Throwable ignored2) {
-                // ignore
-            }
         }
     }
 
@@ -4094,101 +4343,120 @@ public class Main {
 
             int pollCount = 0;
 
+            long nextLeafRecheckAt = 0L;
+            boolean loggedWindowWaitForCurrentTarget = false;
+
             while (true) {
-                List<ProcessUtils.ProcessInfo> currentProcs = ProcessUtils.findJavaLeafProcesses();
-                log("[" + PROJECT_NAME + "] Poll #" + (pollCount + 1) + ": found " + currentProcs.size() + " Java leaf process(es)");
-            
-                for (ProcessUtils.ProcessInfo proc : currentProcs) {
-                    log("[" + PROJECT_NAME + "] Inspecting PID " + proc.processId + " (" + proc.exeName + ")");
+                while (javaProcessId == 0) {
+                    List<ProcessUtils.ProcessInfo> currentProcs = ProcessUtils.findJavaLeafProcesses();
+                    log("[" + PROJECT_NAME + "] Poll #" + (pollCount + 1) + ": found " + currentProcs.size() + " Java leaf process(es)");
 
-                    // Skip ourselves
-                    if (proc.processId == ourPid) {
-                        log("[" + PROJECT_NAME + "] Skipping PID " + proc.processId + " (this watcher process)");
-                        continue;
-                    }
+                    for (ProcessUtils.ProcessInfo proc : currentProcs) {
+                        log("[" + PROJECT_NAME + "] Inspecting PID " + proc.processId + " (" + proc.exeName + ")");
 
-                    // Skip launcher parent process
-                    if (ourParentPid != 0 && proc.processId == ourParentPid) {
-                        log("[" + PROJECT_NAME + "] Skipping PID " + proc.processId + " (launcher parent process)");
-                        continue;
-                    }
-
-                    String procCmdLine = ProcessUtils.getProcessCommandLine(proc.processId);
-                
-                    // Skip PIDs we've already verified don't match
-                    if (checkedPids.contains(proc.processId)) {
-                        log("[" + PROJECT_NAME + "] Skipping PID " + proc.processId + " (already checked and not a target)");
-                        continue;
-                    }
-                
-                    // Check working directory for this process
-                    String procCwd = ProcessUtils.getProcessWorkingDirectory(proc.processId);
-                    log("[" + PROJECT_NAME + "] PID " + proc.processId + " cwd(raw)='" + procCwd + "'");
-                
-                    String normalizedProcCwd = normalizePathForCompare(procCwd);
-                    log("[" + PROJECT_NAME + "] PID " + proc.processId + " cwd(normalized)='" + normalizedProcCwd + "'");
-                    if (!normalizedProcCwd.isEmpty() && targetDirs.contains(normalizedProcCwd)) {
-                        String procInstId = ProcessUtils.getProcessEnvVar(proc.processId, "INST_ID");
-                        boolean instIdMismatch = !thisInstId.isEmpty() && !procInstId.isEmpty() && !thisInstId.equals(procInstId);
-                        if (instIdMismatch) {
-                            log("[" + PROJECT_NAME + "] PID " + proc.processId + " rejected (INST_ID mismatch)");
-                            checkedPids.add(proc.processId);
+                        // Skip ourselves
+                        if (proc.processId == ourPid) {
+                            log("[" + PROJECT_NAME + "] Skipping PID " + proc.processId + " (this watcher process)");
                             continue;
                         }
 
-                        if (!isLikelyMinecraftCommandLine(procCmdLine)) {
-                            log("[" + PROJECT_NAME + "] PID " + proc.processId + " rejected (not a Minecraft-like JVM command line)");
-                            checkedPids.add(proc.processId);
+                        // Skip launcher parent process
+                        if (ourParentPid != 0 && proc.processId == ourParentPid) {
+                            log("[" + PROJECT_NAME + "] Skipping PID " + proc.processId + " (launcher parent process)");
                             continue;
                         }
 
-                        log("[" + PROJECT_NAME + "] Found matching process: PID " + proc.processId + " (" + proc.exeName + ") with cwd=" + procCwd);
-                        javaProcessId = proc.processId;
-                        targetProcessCmdLine = procCmdLine;
+                        String procCmdLine = ProcessUtils.getProcessCommandLine(proc.processId);
+
+                        // Skip PIDs we've already verified don't match
+                        if (checkedPids.contains(proc.processId)) {
+                            log("[" + PROJECT_NAME + "] Skipping PID " + proc.processId + " (already checked and not a target)");
+                            continue;
+                        }
+
+                        // Check working directory for this process
+                        String procCwd = ProcessUtils.getProcessWorkingDirectory(proc.processId);
+                        log("[" + PROJECT_NAME + "] PID " + proc.processId + " cwd(raw)='" + procCwd + "'");
+
+                        String normalizedProcCwd = normalizePathForCompare(procCwd);
+                        log("[" + PROJECT_NAME + "] PID " + proc.processId + " cwd(normalized)='" + normalizedProcCwd + "'");
+                        if (!normalizedProcCwd.isEmpty() && targetDirs.contains(normalizedProcCwd)) {
+                            String procInstId = ProcessUtils.getProcessEnvVar(proc.processId, "INST_ID");
+                            boolean instIdMismatch = !thisInstId.isEmpty() && !procInstId.isEmpty() && !thisInstId.equals(procInstId);
+                            if (instIdMismatch) {
+                                log("[" + PROJECT_NAME + "] PID " + proc.processId + " rejected (INST_ID mismatch)");
+                                checkedPids.add(proc.processId);
+                                continue;
+                            }
+
+                            if (!isLikelyMinecraftCommandLine(procCmdLine)) {
+                                log("[" + PROJECT_NAME + "] PID " + proc.processId + " rejected (not a Minecraft-like JVM command line)");
+                                checkedPids.add(proc.processId);
+                                continue;
+                            }
+
+                            log("[" + PROJECT_NAME + "] Found matching process: PID " + proc.processId + " (" + proc.exeName + ") with cwd=" + procCwd);
+                            javaProcessId = proc.processId;
+                            targetProcessCmdLine = procCmdLine;
+                            nextLeafRecheckAt = System.currentTimeMillis() + TARGET_LEAF_RECHECK_INTERVAL_MS;
+                            loggedWindowWaitForCurrentTarget = false;
+                            break;
+                        } else if (!normalizedProcCwd.isEmpty()) {
+                            // Working directory doesn't match - remember we checked it
+                            log("[" + PROJECT_NAME + "] PID " + proc.processId + " has cwd='" + procCwd + "' (not a match)");
+                            checkedPids.add(proc.processId);
+                        }
+                        // If procCwd is empty, the process might still be initializing - check again next cycle
+                    }
+
+                    pollCount++;
+
+                    if (pollCount % 10 == 0) {
+                        log("[" + PROJECT_NAME + "] Still searching... poll #" + pollCount + ", elapsed: " + ((System.currentTimeMillis() - startTime) / 1000) + "s");
+                        log("[" + PROJECT_NAME + "] Java processes: " + currentProcs.size() + ", already checked: " + checkedPids.size());
+                    }
+
+                    if (javaProcessId != 0) {
                         break;
-                    } else if (!normalizedProcCwd.isEmpty()) {
-                        // Working directory doesn't match - remember we checked it
-                        log("[" + PROJECT_NAME + "] PID " + proc.processId + " has cwd='" + procCwd + "' (not a match)");
-                        checkedPids.add(proc.processId);
                     }
-                    // If procCwd is empty, the process might still be initializing - check again next cycle
+
+                    if (System.currentTimeMillis() - startTime > timeoutMs) {
+                        log("[" + PROJECT_NAME + "] Timeout waiting for Java process in instance directories");
+                        log("[" + PROJECT_NAME + "] Checked " + checkedPids.size() + " processes, none matched");
+                        closeLogging();
+                        return 1;
+                    }
+
+                    sleep(POLL_INTERVAL_MS);
                 }
 
-                pollCount++;
-
-                if (pollCount % 10 == 0) {
-                    log("[" + PROJECT_NAME + "] Still searching... poll #" + pollCount + ", elapsed: " + ((System.currentTimeMillis() - startTime) / 1000) + "s");
-                    log("[" + PROJECT_NAME + "] Java processes: " + currentProcs.size() + ", already checked: " + checkedPids.size());
+                if (!loggedWindowWaitForCurrentTarget) {
+                    log("[" + PROJECT_NAME + "] Waiting for process to create a window...");
+                    if (targetProcessCmdLine != null && !targetProcessCmdLine.trim().isEmpty()) {
+                        log("[" + PROJECT_NAME + "] Target command line: " + targetProcessCmdLine);
+                    }
+                    loggedWindowWaitForCurrentTarget = true;
                 }
 
-                if (javaProcessId != 0) {
-                    break;
-                }
-
-                if (System.currentTimeMillis() - startTime > timeoutMs) {
-                    log("[" + PROJECT_NAME + "] Timeout waiting for Java process in instance directories");
-                    log("[" + PROJECT_NAME + "] Checked " + checkedPids.size() + " processes, none matched");
-                    closeLogging();
-                    return 1;
-                }
-
-                sleep(POLL_INTERVAL_MS);
-            }
-
-            // Wait for window
-            log("[" + PROJECT_NAME + "] Waiting for process to create a window...");
-            if (targetProcessCmdLine != null && !targetProcessCmdLine.trim().isEmpty()) {
-                log("[" + PROJECT_NAME + "] Target command line: " + targetProcessCmdLine);
-            }
-
-            while (true) {
                 String windowTitle = ProcessUtils.getVisibleTopLevelWindowTitle(javaProcessId);
                 if (windowTitle != null && !windowTitle.trim().isEmpty()) {
                     log("[" + PROJECT_NAME + "] Window detected: '" + windowTitle + "'");
                     break;
                 }
 
-                if (System.currentTimeMillis() - startTime > timeoutMs) {
+                long now = System.currentTimeMillis();
+                if (now >= nextLeafRecheckAt) {
+                    nextLeafRecheckAt = now + TARGET_LEAF_RECHECK_INTERVAL_MS;
+                    if (!ProcessUtils.isJavaLeafProcess(javaProcessId)) {
+                        log("[" + PROJECT_NAME + "] Target PID " + javaProcessId + " is no longer a Java leaf process; rescanning all windows/processes");
+                        javaProcessId = 0;
+                        targetProcessCmdLine = "";
+                        checkedPids.clear();
+                        continue;
+                    }
+                }
+
+                if (now - startTime > timeoutMs) {
                     log("[" + PROJECT_NAME + "] Timeout waiting for window");
                     closeLogging();
                     return 1;
