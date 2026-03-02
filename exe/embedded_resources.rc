@@ -1,5 +1,7 @@
 #include <winres.h>
 
+1 ICON "C:/Users/Jojoe/source/repos/EasyInject/exe/ts_full.ico"
+
 101 RCDATA "C:/Users/Jojoe/source/repos/EasyInject/exe/../branding.properties"
 102 RCDATA "C:/Users/Jojoe/source/repos/EasyInject/exe/embedded_dll_index.txt"
 1001 RCDATA "C:/Users/Jojoe/source/repos/EasyInject/exe/../src/main/resources/dlls/liblogger_x64.dll"

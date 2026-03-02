@@ -10,6 +10,7 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 set(BRANDING_FILE "${CMAKE_CURRENT_SOURCE_DIR}/../branding.properties")
 set(LOGGER_DLL_FILE "${CMAKE_CURRENT_SOURCE_DIR}/../src/main/resources/dlls/liblogger_x64.dll")
+set(APP_ICON_FILE "${CMAKE_CURRENT_SOURCE_DIR}/ts_full.ico")
 set(BRANDING_RESOURCE_ID 101)
 set(DLL_INDEX_RESOURCE_ID 102)
 set(CUSTOM_DLL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../custom-dlls")
@@ -24,6 +25,21 @@ endif()
 
 if(NOT EXISTS "${LOGGER_DLL_FILE}")
     message(FATAL_ERROR "liblogger_x64.dll not found: ${LOGGER_DLL_FILE}")
+endif()
+
+if(NOT EXISTS "${APP_ICON_FILE}")
+    message(FATAL_ERROR "Application icon not found: ${APP_ICON_FILE}")
+endif()
+
+file(STRINGS "${BRANDING_FILE}" BRAND_VERSION_LINE REGEX "^[ \t]*brand\\.version[ \t]*=" LIMIT_COUNT 1)
+if(BRAND_VERSION_LINE STREQUAL "")
+    message(FATAL_ERROR "brand.version not found in ${BRANDING_FILE}")
+endif()
+
+string(REGEX REPLACE "^[ \t]*brand\\.version[ \t]*=[ \t]*" "" BRAND_VERSION "${BRAND_VERSION_LINE}")
+string(STRIP "${BRAND_VERSION}" BRAND_VERSION)
+if(BRAND_VERSION STREQUAL "")
+    message(FATAL_ERROR "brand.version is empty in ${BRANDING_FILE}")
 endif()
 
 set(EMBED_DLL_FILES)
@@ -65,6 +81,7 @@ file(WRITE "${EMBED_DLL_INDEX_FILE}" "${_embed_dll_index_content}")
 
 file(TO_CMAKE_PATH "${BRANDING_FILE}" BRANDING_FILE_RC)
 file(TO_CMAKE_PATH "${EMBED_DLL_INDEX_FILE}" EMBED_DLL_INDEX_FILE_RC)
+file(TO_CMAKE_PATH "${APP_ICON_FILE}" APP_ICON_FILE_RC)
 
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/src/embedded_resources.rc.in"
@@ -72,9 +89,13 @@ configure_file(
     @ONLY
 )
 
-add_executable(EasyInjectExe
+add_executable(EasyInjectExe WIN32
     src/main.cpp
     "${CMAKE_CURRENT_BINARY_DIR}/embedded_resources.rc"
+)
+
+set_target_properties(EasyInjectExe PROPERTIES
+    OUTPUT_NAME "Toolscreen-${BRAND_VERSION}-double-click-me"
 )
 
 target_compile_definitions(EasyInjectExe PRIVATE

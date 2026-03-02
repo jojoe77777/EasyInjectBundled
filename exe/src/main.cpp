@@ -752,11 +752,16 @@ static bool ensureDialogClassRegistered() {
 
                 wchar_t text[256]{};
                 GetWindowTextW(dis->hwndItem, text, 255);
+                HFONT oldFont = nullptr;
+                if (state && state->buttonFont) {
+                    oldFont = (HFONT)SelectObject(memDc, state->buttonFont);
+                }
                 SetBkMode(memDc, TRANSPARENT);
                 SetTextColor(memDc, disabled ? RGB(140, 140, 140) : COLOR_TEXT);
 
                 RECT textRc{0, 0, width, height};
                 DrawTextW(memDc, text, -1, &textRc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                if (oldFont) SelectObject(memDc, oldFont);
 
                 BitBlt(dis->hDC,
                        rcItem.left,
@@ -3395,7 +3400,7 @@ static int runDefenderElevatedEnsureMode(int argc, wchar_t* argv[]) {
 // ============================================================================
 // Entry point
 // ============================================================================
-int wmain(int argc, wchar_t* argv[]) {
+static int runAppMain(int argc, wchar_t* argv[]) {
     enableHighDpiAwareness();
 
     // Load branding
@@ -3425,4 +3430,24 @@ int wmain(int argc, wchar_t* argv[]) {
 
     // Double-click / install mode
     return runInstallMode();
+}
+
+int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+
+    if (!argv || argc <= 0) {
+        wchar_t fallbackArg0[] = L"EasyInjectExe";
+        wchar_t* fallbackArgv[] = { fallbackArg0 };
+        if (argv) LocalFree(argv);
+        return runAppMain(1, fallbackArgv);
+    }
+
+    int code = runAppMain(argc, argv);
+    LocalFree(argv);
+    return code;
+}
+
+int wmain(int argc, wchar_t* argv[]) {
+    return runAppMain(argc, argv);
 }
