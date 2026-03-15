@@ -20,8 +20,8 @@ namespace fs = std::filesystem;
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "winhttp.lib")
 
-static const wchar_t* kWindowClassName = L"ToolscreenInstallerWindow";
-static const wchar_t* kInstallerTitle = L"Toolscreen Installer";
+static const wchar_t* kWindowClassName = L"ToolscreenDownloaderWindow";
+static const wchar_t* kInstallerTitle = L"Toolscreen Downloader";
 static const wchar_t* kTargetFileName = L"Toolscreen.exe";
 static const wchar_t* kFallbackApiUrl = L"https://api.github.com/repos/jojoe77777/Toolscreen/releases/latest";
 static const wchar_t* kFallbackReleasesUrl = L"https://github.com/jojoe77777/Toolscreen/releases";
@@ -324,7 +324,7 @@ static HttpResponse get(const std::wstring& url) {
         return response;
     }
 
-    HINTERNET session = WinHttpOpen(L"Toolscreen-Installer/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+    HINTERNET session = WinHttpOpen(L"Toolscreen-Downloader/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
         WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!session) {
         response.errorMessage = L"Failed to initialize WinHTTP.";
@@ -416,7 +416,7 @@ static bool downloadToFile(
         status(L"Connecting to GitHub...");
     }
 
-    HINTERNET session = WinHttpOpen(L"Toolscreen-Installer/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+    HINTERNET session = WinHttpOpen(L"Toolscreen-Downloader/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
         WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!session) {
         errorMessage = L"Failed to initialize WinHTTP.";
@@ -483,7 +483,7 @@ static bool downloadToFile(
     fs::create_directories(outFile.parent_path());
     std::ofstream output(outFile, std::ios::binary | std::ios::trunc);
     if (!output.is_open()) {
-        errorMessage = L"Could not create the output file next to the installer.";
+        errorMessage = L"Could not create the output file next to the downloader.";
         WinHttpCloseHandle(request);
         WinHttpCloseHandle(connection);
         WinHttpCloseHandle(session);
@@ -588,7 +588,7 @@ static bool moveIntoPlace(const fs::path& sourceFile, const fs::path& targetFile
         DeleteFileW(sourceFile.c_str());
         return true;
     }
-    errorMessage = L"The download completed, but Toolscreen.exe could not be written in the installer folder.";
+    errorMessage = L"The download completed, but Toolscreen.exe could not be written in the downloader folder.";
     return false;
 }
 
@@ -669,8 +669,8 @@ static DWORD WINAPI downloadWorkerProc(LPVOID parameter) {
     }
 
     std::wstring successMessage =
-        L"Toolscreen has been installed.\n\nSaved to:\n" + targetFile.wstring() +
-        L"\n\nLaunch your instance to continue.";
+        L"Toolscreen has been downloaded.\n\nSaved to:\n" + targetFile.wstring() +
+        L"\n\nYou must run that file to install Toolscreen.\nThis EXE was only the downloader.";
     postCompletion(context->hwnd, true, successMessage);
     return 0;
 }
@@ -840,14 +840,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     InitCommonControlsEx(&controls);
 
     if (!registerWindowClass(instance)) {
-        MessageBoxW(nullptr, L"The installer window could not be created.", kInstallerTitle, MB_OK | MB_ICONERROR | MB_TOPMOST);
+        MessageBoxW(nullptr, L"The downloader window could not be created.", kInstallerTitle, MB_OK | MB_ICONERROR | MB_TOPMOST);
         return 1;
     }
 
     WindowState state;
     HWND hwnd = createMainWindow(instance, &state);
     if (hwnd == nullptr) {
-        MessageBoxW(nullptr, L"The installer window could not be created.", kInstallerTitle, MB_OK | MB_ICONERROR | MB_TOPMOST);
+        MessageBoxW(nullptr, L"The downloader window could not be created.", kInstallerTitle, MB_OK | MB_ICONERROR | MB_TOPMOST);
         return 1;
     }
     state.hwnd = hwnd;
@@ -858,7 +858,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     HANDLE workerThread = CreateThread(nullptr, 0, downloadWorkerProc, &workerContext, 0, nullptr);
     if (workerThread == nullptr) {
         DestroyWindow(hwnd);
-        MessageBoxW(nullptr, L"The installer download worker could not be started.", kInstallerTitle, MB_OK | MB_ICONERROR | MB_TOPMOST);
+        MessageBoxW(nullptr, L"The downloader worker could not be started.", kInstallerTitle, MB_OK | MB_ICONERROR | MB_TOPMOST);
         return 1;
     }
 
@@ -876,7 +876,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
     UINT flags = MB_OK | MB_TOPMOST | (state.success ? MB_ICONINFORMATION : MB_ICONERROR);
     std::wstring finalMessage = state.finalMessage.empty()
-        ? (state.success ? L"Toolscreen has been installed." : L"Toolscreen installation failed.")
+        ? (state.success ? L"Toolscreen has been downloaded." : L"Toolscreen download failed.")
         : state.finalMessage;
     MessageBoxW(nullptr, finalMessage.c_str(), kInstallerTitle, flags);
     return state.success ? 0 : 1;

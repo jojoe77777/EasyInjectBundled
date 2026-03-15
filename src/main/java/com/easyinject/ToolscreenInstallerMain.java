@@ -24,7 +24,7 @@ import java.util.regex.Pattern;
 
 public final class ToolscreenInstallerMain {
 
-    private static final String INSTALLER_NAME = "Toolscreen Installer";
+    private static final String INSTALLER_NAME = "Toolscreen Downloader";
     private static final String TARGET_FILE_NAME = "Toolscreen.jar";
     private static final String DEFAULT_RELEASES_URL = "https://github.com/jojoe77777/Toolscreen/releases";
     private static final String DEFAULT_API_URL = "https://api.github.com/repos/jojoe77777/Toolscreen/releases/latest";
@@ -35,7 +35,7 @@ public final class ToolscreenInstallerMain {
 
     public static void main(String[] args) {
         try {
-            Main.applyDarkTheme();
+            applyDarkTheme();
         } catch (Throwable ignored) {
             // ignore
         }
@@ -45,7 +45,7 @@ public final class ToolscreenInstallerMain {
             runInstaller();
         } catch (Throwable t) {
             exitCode = 1;
-            showError("Installation failed.\n\n" + buildErrorMessage(t));
+            showError("Download failed.\n\n" + buildErrorMessage(t));
         }
         System.exit(exitCode);
     }
@@ -104,6 +104,35 @@ public final class ToolscreenInstallerMain {
         }
 
         showSuccess(outFile);
+    }
+
+    private static void applyDarkTheme() {
+        Color bg = new Color(43, 43, 43);
+        Color fg = new Color(224, 224, 224);
+        Color fieldBg = new Color(30, 30, 30);
+        Color btnBg = new Color(60, 60, 60);
+        Font baseFont = new Font("Segoe UI", Font.PLAIN, 13);
+        Font btnFont = new Font("Segoe UI", Font.PLAIN, 12);
+
+        UIManager.put("OptionPane.background", bg);
+        UIManager.put("OptionPane.messageForeground", fg);
+        UIManager.put("OptionPane.messageFont", baseFont);
+        UIManager.put("Panel.background", bg);
+        UIManager.put("Panel.foreground", fg);
+        UIManager.put("Label.background", bg);
+        UIManager.put("Label.foreground", fg);
+        UIManager.put("Label.font", baseFont);
+        UIManager.put("Button.background", btnBg);
+        UIManager.put("Button.foreground", fg);
+        UIManager.put("Button.font", btnFont);
+        UIManager.put("Button.border", BorderFactory.createCompoundBorder(
+            BorderFactory.createLineBorder(new Color(80, 80, 80)),
+            BorderFactory.createEmptyBorder(4, 12, 4, 12)
+        ));
+        UIManager.put("TextField.background", fieldBg);
+        UIManager.put("TextField.foreground", fg);
+        UIManager.put("TextField.caretForeground", fg);
+        UIManager.put("TextField.font", new Font("Consolas", Font.PLAIN, 12));
     }
 
     private static Properties loadBrandingProperties() {
@@ -173,7 +202,7 @@ public final class ToolscreenInstallerMain {
         HttpURLConnection conn = openHttp(new URL(apiUrl));
         conn.setRequestMethod("GET");
         conn.setRequestProperty("Accept", "application/vnd.github+json");
-        conn.setRequestProperty("User-Agent", "Toolscreen-Installer");
+        conn.setRequestProperty("User-Agent", "Toolscreen-Downloader");
         conn.setConnectTimeout(10_000);
         conn.setReadTimeout(15_000);
 
@@ -412,7 +441,7 @@ public final class ToolscreenInstallerMain {
         URL url = new URL(urlStr);
         HttpURLConnection conn = openHttp(url);
         conn.setInstanceFollowRedirects(true);
-        conn.setRequestProperty("User-Agent", "Toolscreen-Installer");
+        conn.setRequestProperty("User-Agent", "Toolscreen-Downloader");
         conn.setRequestProperty("Accept", "application/octet-stream");
         conn.setConnectTimeout(10_000);
         conn.setReadTimeout(30_000);
@@ -495,7 +524,8 @@ public final class ToolscreenInstallerMain {
     private static void showSuccess(File outFile) {
         JOptionPane.showMessageDialog(
             null,
-            "Toolscreen has been installed.\n\nSaved to:\n" + outFile.getAbsolutePath() + "\n\nLaunch your instance to continue.",
+            "Toolscreen has been downloaded.\n\nSaved to:\n" + outFile.getAbsolutePath() +
+                "\n\nYou must run that file to install Toolscreen.\nThis JAR was only the downloader.",
             INSTALLER_NAME,
             JOptionPane.INFORMATION_MESSAGE
         );

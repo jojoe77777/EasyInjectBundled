@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ToolscreenInstallerExe LANGUAGES CXX RC)
+project(ToolscreenDownloaderExe LANGUAGES CXX RC)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -46,27 +46,27 @@ configure_file(
     @ONLY
 )
 
-add_executable(ToolscreenInstallerExe WIN32
+add_executable(ToolscreenDownloaderExe WIN32
     src/main.cpp
     "${CMAKE_CURRENT_BINARY_DIR}/app.rc"
 )
 
-target_include_directories(ToolscreenInstallerExe PRIVATE
+target_include_directories(ToolscreenDownloaderExe PRIVATE
     "${CMAKE_CURRENT_BINARY_DIR}"
 )
 
-set_target_properties(ToolscreenInstallerExe PROPERTIES
-    OUTPUT_NAME "toolscreen-installer"
+set_target_properties(ToolscreenDownloaderExe PROPERTIES
+    OUTPUT_NAME "toolscreen-downloader"
 )
 
-target_compile_definitions(ToolscreenInstallerExe PRIVATE
+target_compile_definitions(ToolscreenDownloaderExe PRIVATE
     UNICODE
     _UNICODE
     WIN32_LEAN_AND_MEAN
     NOMINMAX
 )
 
-target_link_libraries(ToolscreenInstallerExe PRIVATE
+target_link_libraries(ToolscreenDownloaderExe PRIVATE
     Comctl32
     Kernel32
     User32

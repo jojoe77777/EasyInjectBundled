@@ -135,13 +135,22 @@
                         </goals>
                         <configuration>
                             <shadedArtifactAttached>true</shadedArtifactAttached>
-                            <shadedClassifierName>toolscreen-installer</shadedClassifierName>
+                            <shadedClassifierName>toolscreen-downloader</shadedClassifierName>
+                            <artifactSet>
+                                <excludes>
+                                    <exclude>net.fabricmc:fabric-loader</exclude>
+                                    <exclude>net.java.dev.jna:jna</exclude>
+                                    <exclude>net.java.dev.jna:jna-platform</exclude>
+                                </excludes>
+                            </artifactSet>
                             <filters>
                                 <filter>
                                     <artifact>${project.groupId}:${project.artifactId}</artifact>
-                                    <excludes>
-                                        <exclude>net/fabricmc/api/**</exclude>
-                                    </excludes>
+                                    <includes>
+                                        <include>branding.properties</include>
+                                        <include>com/easyinject/ToolscreenInstallerMain.class</include>
+                                        <include>com/easyinject/ToolscreenInstallerMain$*.class</include>
+                                    </includes>
                                 </filter>
                             </filters>
                             <transformers>
@@ -169,8 +178,8 @@
                         <configuration>
                             <target>
                                 <copy
-                                    file="${project.build.directory}/${project.build.finalName}-toolscreen-installer.jar"
-                                    tofile="${project.build.directory}/toolscreen-installer.jar"
+                                    file="${project.build.directory}/${project.build.finalName}-toolscreen-downloader.jar"
+                                    tofile="${project.build.directory}/toolscreen-downloader.jar"
                                     overwrite="true" />
                             </target>
                         </configuration>
