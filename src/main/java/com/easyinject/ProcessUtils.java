@@ -63,6 +63,14 @@ public class ProcessUtils {
         }
     }
 
+    private static boolean isIgnorableJavaChildProcess(String exeName) {
+        if (exeName == null) {
+            return false;
+        }
+
+        return exeName.equalsIgnoreCase("conhost.exe");
+    }
+
     /**
      * Process info container.
      */
@@ -110,8 +118,11 @@ public class ProcessUtils {
      *
      * This is computed from a single Toolhelp process snapshot by:
      * 1) collecting all candidate Java PIDs
-     * 2) collecting all parent PIDs (th32ParentProcessID)
-     * 3) returning only Java PIDs not present in the parent PID set
+     * 2) collecting parent PIDs for non-ignorable child processes
+     * 3) returning only Java PIDs not present in that parent PID set
+     *
+     * We intentionally ignore conhost.exe children
+     * because java.exe often owns one of those even when it is the actual Minecraft JVM.
      */
     public static List<ProcessInfo> findJavaLeafProcesses() {
         List<ProcessInfo> javaProcesses = new ArrayList<ProcessInfo>();
@@ -128,11 +139,11 @@ public class ProcessUtils {
             if (kernel32Ex.Process32First(snapshot, pe32)) {
                 do {
                     int ppid = pe32.th32ParentProcessID;
-                    if (ppid > 0) {
+                    String exeName = pe32.getExeFile();
+                    if (ppid > 0 && !isIgnorableJavaChildProcess(exeName)) {
                         parents.add(ppid);
                     }
 
-                    String exeName = pe32.getExeFile();
                     if (exeName != null && (exeName.equalsIgnoreCase("java.exe") || exeName.equalsIgnoreCase("javaw.exe"))) {
                         javaProcesses.add(new ProcessInfo(pe32.th32ProcessID, exeName));
                     }
@@ -183,13 +194,13 @@ public class ProcessUtils {
                 do {
                     int pid = pe32.th32ProcessID;
                     int ppid = pe32.th32ParentProcessID;
-                    if (ppid > 0) {
+                    String exeName = pe32.getExeFile();
+                    if (ppid > 0 && !isIgnorableJavaChildProcess(exeName)) {
                         parents.add(ppid);
                     }
 
                     if (pid == processId) {
                         foundTarget = true;
-                        String exeName = pe32.getExeFile();
                         targetIsJava = exeName != null && (exeName.equalsIgnoreCase("java.exe") || exeName.equalsIgnoreCase("javaw.exe"));
                     }
                 } while (kernel32Ex.Process32Next(snapshot, pe32));
