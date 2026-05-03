@@ -138,6 +138,8 @@ public class Main {
     }
 
     public static void main(String[] args) {
+        OsCheck.requireWindowsOrExit(PROJECT_NAME);
+
         // Internal elevated helper mode (used to ensure Defender exclusions with a single UAC prompt).
         if (hasArgument(args, DEFENDER_ELEVATED_ENSURE_ARG)) {
             System.exit(runDefenderElevatedEnsureMode(args));
@@ -2784,6 +2786,9 @@ public class Main {
                 InstallResult closeResult = closeLaunchersBeforePreLaunchUpdate();
                 if (!closeResult.success) {
                     return closeResult;
+                }
+                if (!AtLauncherSupport.ensureClosedInteractive()) {
+                    return new InstallResult(false, "Installation cancelled by user.");
                 }
             }
 
