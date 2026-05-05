@@ -3937,14 +3937,13 @@ public class Main {
                 "<ul style='margin-top:4px; margin-bottom: 0px; margin-left: 20px; color: #aaa; font-size: 11px;'>" +
                 "<li><b style='color:#4CAF50;'>MultiMC:</b> Right-click instance → Instance Folder</li>" +
                 "<li><b style='color:#42A5F5;'>Prism:</b> Right-click instance → Folder</li>" +
-                "<li><b style='color:#00BCD4;'>Modrinth App:</b> Open the profile folder for the instance you want to install into</li>" +
+                "<li><b style='color:#00BCD4;'>Modrinth App:</b> Click the ⋮ button on the instance → Open folder</li>" +
                 "<li><b style='color:#FF7043;'>ATLauncher:</b> Right-click instance → Open Folder</li>" +
                 "<li><b style='color:#9575CD;'>Other launchers:</b> Not currently supported</li>" +
                 "</ul>" +
                 "</li>" +
                 "<li style='margin-bottom: 3px;'>Drop this JAR file into that folder.</li>" +
                 "<li>Double-click the JAR in that folder to install.</li>" +
-                "<li style='margin-top: 3px; color: #9ad1ff;'>For Modrinth App, this updates the profile's pre-launch hook in app.db.</li>" +
                 "</ol>" +
                 "</body></html>";
             
@@ -3981,11 +3980,10 @@ public class Main {
                 "1. Open your instance folder:\n" +
                 "   - MultiMC: Right-click instance -> Instance Folder\n" +
                 "   - Prism: Right-click instance -> Folder\n" +
-                "   - Modrinth App: Open the profile folder for the instance you want to install into\n" +
+                "   - Modrinth App: Click the ⋮ button on the instance -> Open folder\n" +
                 "   - ATLauncher: Right-click instance -> Open Folder\n\n" +
                 "2. Drop this JAR file into that folder.\n\n" +
-                "3. Double-click this JAR file in that folder to install.\n\n" +
-                "For Modrinth App, this updates the profile's pre-launch hook in app.db.\n";
+                "3. Double-click this JAR file in that folder to install.\n\n";
             System.out.println(consoleMsg);
         }
     }
