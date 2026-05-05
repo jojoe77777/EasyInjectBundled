@@ -125,6 +125,19 @@
                                         <exclude>net/fabricmc/api/**</exclude>
                                     </excludes>
                                 </filter>
+                                <filter>
+                                    <artifact>org.xerial:sqlite-jdbc</artifact>
+                                    <excludes>
+                                        <exclude>org/sqlite/native/Linux-Android/**</exclude>
+                                        <exclude>org/sqlite/native/Linux-Musl/**</exclude>
+                                        <exclude>org/sqlite/native/FreeBSD/**</exclude>
+                                        <exclude>org/sqlite/native/Linux/**</exclude>
+                                        <exclude>org/sqlite/native/Mac/**</exclude>
+                                        <exclude>org/sqlite/native/Windows/aarch64/**</exclude>
+                                        <exclude>org/sqlite/native/Windows/armv7/**</exclude>
+                                        <exclude>org/sqlite/native/Windows/x86/**</exclude>
+                                    </excludes>
+                                </filter>
                             </filters>
                             <transformers>
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
@@ -148,6 +161,7 @@
                                     <exclude>net.fabricmc:fabric-loader</exclude>
                                     <exclude>net.java.dev.jna:jna</exclude>
                                     <exclude>net.java.dev.jna:jna-platform</exclude>
+                                    <exclude>org.xerial:sqlite-jdbc</exclude>
                                 </excludes>
                             </artifactSet>
                             <filters>
