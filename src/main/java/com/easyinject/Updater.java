@@ -24,7 +24,8 @@ import java.util.regex.Pattern;
  * - Never block game launch unless the user explicitly confirms the update.
  * - No hardcoded repository URLs: all endpoints come from branding.properties.
  * - Windows-friendly replace flow: the running JAR cannot overwrite itself, so we
- *   download to a temp file and then spawn a detached script which replaces the
+ *   download into the persistent excluded dlls folder and then spawn a detached
+ *   script which replaces the
  *   JAR after this process exits, then spawns the watcher.
  */
 public final class Updater {
@@ -167,11 +168,14 @@ public final class Updater {
 
         log(logSink, "Selected asset: " + asset.name);
 
-        File tempDir = new File(System.getProperty("java.io.tmpdir"), projectName + "-update");
-        //noinspection ResultOfMethodCallIgnored
-        tempDir.mkdirs();
+        File updateDir = Main.getPreferredPersistentDllDir();
+        if ((updateDir.exists() && updateDir.isDirectory()) || updateDir.mkdirs()) {
+            log(logSink, "Using persistent update directory: " + updateDir.getAbsolutePath());
+        } else {
+            log(logSink, "Persistent update directory could not be created; attempting to continue with: " + updateDir.getAbsolutePath());
+        }
 
-        File downloadedJar = new File(tempDir, "update-" + remoteVersion + ".jar");
+        File downloadedJar = new File(updateDir, "update-" + remoteVersion + ".jar");
 
         DownloadResult dl = downloadWithProgressUI(projectName, asset, downloadedJar);
         if (dl == null || !dl.success) {

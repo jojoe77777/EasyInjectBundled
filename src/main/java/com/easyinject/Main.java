@@ -1860,7 +1860,7 @@ public class Main {
         return out;
     }
 
-    private static File getPreferredPersistentDllDir() {
+    static File getPreferredPersistentDllDir() {
         String userHome = null;
         try {
             userHome = System.getProperty("user.home");

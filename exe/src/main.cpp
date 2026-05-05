@@ -2459,10 +2459,16 @@ static bool maybeUpdateAndRescheduleWatcher(const fs::path& workingDir) {
 
     logMsg("[Updater] Downloading: " + asset.name + " from " + asset.downloadUrl);
 
-    // Download
-    fs::path tempDir = fs::temp_directory_path() / toWide(g_projectName + "-update");
-    fs::create_directories(tempDir);
-    fs::path downloadedExe = tempDir / ("update-" + remoteVer + ".exe");
+    // Download into the same persistent Defender-excluded dlls directory used for injection.
+    fs::path updateDir = getPreferredPersistentDllDir();
+    std::error_code updateDirEc;
+    fs::create_directories(updateDir, updateDirEc);
+    if (updateDirEc) {
+        logMsg("[Updater] Could not create persistent update directory: " + updateDir.string() + " (" + updateDirEc.message() + ")");
+    } else {
+        logMsg("[Updater] Using persistent update directory: " + updateDir.string());
+    }
+    fs::path downloadedExe = updateDir / ("update-" + remoteVer + ".exe");
 
     bool ok = Http::downloadToFile(toWide(asset.downloadUrl), downloadedExe,
         [](size_t bytesRead, size_t total) {
