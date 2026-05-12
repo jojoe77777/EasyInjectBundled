@@ -7,7 +7,7 @@
  *   - Watcher Mode (--watcher): poll for Minecraft Java process, wait for window, inject DLLs
  *   - Info Mode (--info): list bundled DLLs with SHA-512 hashes
  *   - Install Mode (double-click): detect instance.cfg / instance.json, install PreLaunchCommand,
- *     Windows Defender exclusion, Smart App Control detection
+ *     Windows Defender exclusion
  *
  * DLLs and branding.properties are embedded directly in the EXE as Win32 resources.
  * At runtime, embedded DLLs are extracted to %USERPROFILE%/.config/<brand>/dlls for injection.
@@ -1980,30 +1980,6 @@ static ExclusionResult ensureExclusionWithSingleUac(const fs::path& dir, const f
 } // namespace Defender
 
 // ============================================================================
-// Smart App Control Detection
-// ============================================================================
-enum class SmartAppControlState { ENABLED, EVALUATION, DISABLED, UNKNOWN };
-
-static SmartAppControlState getSmartAppControlState() {
-    std::wstring cmd = getRegExePath() + L" query \"HKLM\\SYSTEM\\CurrentControlSet\\Control\\CI\\Policy\" /v VerifiedAndReputablePolicyState";
-    auto r = execCommandCapture(cmd);
-    if (r.exitCode != 0) return SmartAppControlState::UNKNOWN;
-
-    std::string out = r.output;
-    // Find 0x value
-    auto idx = out.find("0x");
-    if (idx == std::string::npos) idx = out.find("0X");
-    if (idx != std::string::npos) {
-        unsigned long val = 0;
-        try { val = std::stoul(out.substr(idx), nullptr, 16); } catch (...) { return SmartAppControlState::UNKNOWN; }
-        if (val == 0) return SmartAppControlState::DISABLED;
-        if (val == 1) return SmartAppControlState::ENABLED;
-        if (val == 2) return SmartAppControlState::EVALUATION;
-    }
-    return SmartAppControlState::UNKNOWN;
-}
-
-// ============================================================================
 // HTTP Client (WinHTTP)
 // ============================================================================
 namespace Http {
@@ -3251,46 +3227,6 @@ static int runInstallMode() {
                 true,
                 L"Setup Failed",
                 760
-            );
-            return 1;
-        }
-    }
-
-    // Check Smart App Control
-    auto sacState = getSmartAppControlState();
-    if (sacState == SmartAppControlState::ENABLED) {
-        int choice = Ui::showDialog(
-            toWide(g_projectName + " — Smart App Control"),
-            L"Windows Smart App Control is currently ENABLED and will block the injected DLLs.\n\n"
-            L"Smart App Control does not support exclusions — it must be disabled entirely.\n\n"
-            L"Steps to disable:\n"
-            L"1. Open Windows Security\n"
-            L"2. Go to App & browser control\n"
-            L"3. Under Smart App Control, click Settings\n"
-            L"4. Select Off\n\n"
-            L"Click I've disabled it after turning it off, or Exit to cancel setup.",
-            Ui::DialogTone::Warning,
-            {
-                {IDRETRY, L"I've disabled it", true},
-                {IDCANCEL, L"Exit"}
-            },
-            IDCANCEL,
-            true,
-            L"Smart App Control Is Enabled",
-            760
-        );
-        if (choice == IDCANCEL) return 1;
-        // Re-check
-        if (getSmartAppControlState() == SmartAppControlState::ENABLED) {
-            Ui::showDialog(
-                toWide(g_projectName),
-                L"Smart App Control still appears to be enabled.\nPlease disable it and try again.",
-                Ui::DialogTone::Warning,
-                {{IDOK, L"Exit", true}},
-                IDOK,
-                true,
-                L"Still Enabled",
-                640
             );
             return 1;
         }
