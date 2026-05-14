@@ -293,7 +293,9 @@ public class Main {
         if (profilesDir == null || !profilesDir.getName().equals("profiles")) return null;
 
         File modrinthApp = profilesDir.getParentFile();
-        if (modrinthApp == null || !modrinthApp.getName().equals("ModrinthApp")) return null;
+        if (modrinthApp == null) return null;
+        String name = modrinthApp.getName();
+        if (!name.equals("ModrinthApp") && !name.equals("Modrinth App")) return null;
 
         return new ModrinthInstance(dir.getName(), new File(modrinthApp, "app.db"));
     }
