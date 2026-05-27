@@ -1,5 +1,8 @@
 package com.easyinject;
 
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import com.sun.jna.platform.win32.Kernel32;
 import com.sun.jna.platform.win32.Shell32;
 import com.sun.jna.platform.win32.ShellAPI;
@@ -167,6 +170,11 @@ public class Main {
      * and install PreLaunchCommand.
      */
     private static void showDoubleClickWarning() {
+        if (isMcsrLauncherInstance(resolveInstanceDirFromJar())) {
+            showMcsrLauncherWarning();
+            return;
+        }
+
         // If the user double-clicks the JAR, start with a clean log for easier troubleshooting.
         resetLogFilesForStartup();
 
@@ -3713,6 +3721,94 @@ public class Main {
                 "2. Drop this JAR file into that folder.\n\n" +
                 "3. Double-click this JAR file in that folder to install.\n\n";
             System.out.println(consoleMsg);
+        }
+    }
+
+    private static final String TOOLSCREEN_DISCORD_URL = "https://discord.gg/A2v6bCJg6K";
+    private static final String MCSR_RANKED_DISCORD_URL = "https://discord.com/invite/mcsrranked";
+
+    private static File resolveInstanceDirFromJar() {
+        try {
+            File jarFile = new File(getJarPath());
+            File jarDir = jarFile.isFile() ? canonicalize(jarFile.getParentFile()) : null;
+            if (jarDir == null) {
+                return null;
+            }
+            return isMinecraftDir(jarDir) ? jarDir.getParentFile() : jarDir;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static boolean isMcsrLauncherInstance(File instanceDir) {
+        if (instanceDir == null || !instanceDir.isDirectory()) {
+            return false;
+        }
+        File instanceJson = new File(instanceDir, "instance.json");
+        if (!instanceJson.isFile()) {
+            return false;
+        }
+        try {
+            String json = new String(Files.readAllBytes(instanceJson.toPath()), java.nio.charset.StandardCharsets.UTF_8);
+            JsonElement root = JsonParser.parseString(json);
+            if (root == null || !root.isJsonObject()) {
+                return false;
+            }
+            JsonObject obj = root.getAsJsonObject();
+            JsonElement lwjgl = obj.get("lwjglVersion");
+            return lwjgl != null && lwjgl.isJsonObject()
+                && obj.has("minecraftVersion")
+                && obj.has("displayName");
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static void showMcsrLauncherWarning() {
+        try {
+            applyDarkTheme();
+
+            String message =
+                "<html><body style='width: 360px; font-family: Segoe UI, sans-serif; font-size: 13px; color: #e0e0e0;'>" +
+                "<p style='margin:0 0 12px 0; color: #FFA726;'><b>MCSR Launcher instance</b></p>" +
+                "<p style='margin:0 0 12px 0;'>This is an MCSR Launcher instance. Installing Toolscreen here manually won't work, the launcher handles it for you.</p>" +
+                "<p style='margin:0 0 12px 0;'>Use the launcher instead: <b>Edit instance &rarr; Tools &rarr; tick Toolscreen</b>.</p>" +
+                "<p style='margin:0;'>Need help? Join a Discord:</p>" +
+                "</body></html>";
+
+            javax.swing.JLabel msgLabel = new javax.swing.JLabel(message);
+
+            javax.swing.JButton toolscreenBtn = createStyledButton("Toolscreen");
+            javax.swing.JButton rankedBtn = createStyledButton("MCSR Ranked");
+            javax.swing.JButton closeBtn = createStyledButton("Close");
+
+            toolscreenBtn.addActionListener(e -> openUrl(TOOLSCREEN_DISCORD_URL));
+            rankedBtn.addActionListener(e -> openUrl(MCSR_RANKED_DISCORD_URL));
+
+            final javax.swing.JOptionPane pane = new javax.swing.JOptionPane(
+                msgLabel,
+                javax.swing.JOptionPane.PLAIN_MESSAGE,
+                javax.swing.JOptionPane.DEFAULT_OPTION,
+                null,
+                new Object[] { toolscreenBtn, rankedBtn, closeBtn },
+                closeBtn
+            );
+            final javax.swing.JDialog dialog = pane.createDialog(null, PROJECT_NAME + " v" + VERSION + " — MCSR Launcher Detected");
+            dialog.setDefaultCloseOperation(javax.swing.JDialog.DISPOSE_ON_CLOSE);
+            closeBtn.addActionListener(e -> dialog.dispose());
+            dialog.setVisible(true);
+        } catch (Throwable ignored) {
+            System.out.println(PROJECT_NAME + " is managed by MCSR Launcher. Enable it in the instance options instead of running this installer.");
+        }
+    }
+
+    private static void openUrl(String url) {
+        try {
+            if (java.awt.Desktop.isDesktopSupported()) {
+                java.awt.Desktop.getDesktop().browse(new java.net.URI(url));
+            }
+        } catch (Throwable ignored) {
+            System.err.println("Could not open browser. URL: " + url);
         }
     }
 
