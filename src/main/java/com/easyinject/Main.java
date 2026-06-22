@@ -3725,7 +3725,7 @@ public class Main {
     }
 
     private static final String TOOLSCREEN_DISCORD_URL = "https://discord.gg/A2v6bCJg6K";
-    private static final String MCSR_RANKED_DISCORD_URL = "https://mcsrranked.com/discord";
+    private static final String MCSR_RANKED_DISCORD_URL = "https://discord.mcsrranked.com/";
 
     private static File resolveInstanceDirFromJar() {
         try {
