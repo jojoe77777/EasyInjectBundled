@@ -302,10 +302,11 @@ public class Main {
 
         File modrinthApp = profilesDir.getParentFile();
         if (modrinthApp == null) return null;
-        String name = modrinthApp.getName();
-        if (!name.equals("ModrinthApp") && !name.equals("Modrinth App")) return null;
 
-        return new ModrinthInstance(dir.getName(), new File(modrinthApp, "app.db"));
+        File dbFile = new File(modrinthApp, "app.db");
+        if (!dbFile.isFile()) return null;
+
+        return new ModrinthInstance(dir.getName(), dbFile);
     }
 
     private static File canonicalize(File f) {
