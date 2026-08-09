@@ -32,6 +32,8 @@ import java.util.Date;
 import java.util.Enumeration;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
 import java.util.regex.Matcher;
@@ -287,6 +289,25 @@ public class Main {
         }
     }
 
+    /**
+     * The current Modrinth database stores launch overrides as JSON, keyed by
+     * instance id. Keep the parsed object so changing the pre-launch hook does
+     * not discard the user's other per-instance launch settings.
+     */
+    private static class ModrinthHook {
+        final boolean currentSchema;
+        final String instanceId;
+        final String existingValue;
+        final JsonObject overrides;
+
+        ModrinthHook(boolean currentSchema, String instanceId, String existingValue, JsonObject overrides) {
+            this.currentSchema = currentSchema;
+            this.instanceId = instanceId;
+            this.existingValue = existingValue;
+            this.overrides = overrides;
+        }
+    }
+
     @FunctionalInterface
     private interface ModrinthSqlOp {
         InstallResult run(java.sql.Connection conn) throws java.sql.SQLException;
@@ -301,13 +322,65 @@ public class Main {
         File profilesDir = dir.getParentFile();
         if (profilesDir == null || !profilesDir.getName().equals("profiles")) return null;
 
-        File modrinthApp = profilesDir.getParentFile();
-        if (modrinthApp == null) return null;
+        String profilePath = dir.getName();
+        for (File dbFile : findModrinthDatabaseCandidates(profilesDir)) {
+            if (modrinthDatabaseContainsProfile(dbFile, profilePath)) {
+                return new ModrinthInstance(profilePath, dbFile);
+            }
+        }
+        return null;
+    }
 
-        File dbFile = new File(modrinthApp, "app.db");
-        if (!dbFile.isFile()) return null;
+    /**
+     * Modrinth normally keeps app.db alongside profiles, but its custom data
+     * directory setting moves profiles without moving the settings database.
+     * These candidates mirror Modrinth's current Windows settings directory.
+     */
+    private static List<File> findModrinthDatabaseCandidates(File profilesDir) {
+        Map<String, File> candidates = new LinkedHashMap<String, File>();
+        File configDir = profilesDir.getParentFile();
+        addModrinthDatabaseCandidate(candidates, configDir == null ? null : new File(configDir, "app.db"));
+        addModrinthDatabaseCandidate(candidates, databaseInDirectory(System.getenv("THESEUS_CONFIG_DIR")));
+        addModrinthDatabaseCandidate(candidates, databaseInDirectory(System.getenv("APPDATA"), "com.modrinth.theseus"));
+        addModrinthDatabaseCandidate(candidates, databaseInDirectory(System.getenv("LOCALAPPDATA"), "com.modrinth.theseus"));
+        return new ArrayList<File>(candidates.values());
+    }
 
-        return new ModrinthInstance(dir.getName(), dbFile);
+    private static File databaseInDirectory(String parent, String child) {
+        return parent == null || parent.trim().isEmpty() ? null : new File(new File(parent), child + File.separator + "app.db");
+    }
+
+    private static File databaseInDirectory(String directory) {
+        return directory == null || directory.trim().isEmpty() ? null : new File(directory, "app.db");
+    }
+
+    private static void addModrinthDatabaseCandidate(Map<String, File> candidates, File dbFile) {
+        if (dbFile == null || !dbFile.isFile()) return;
+        File canonical = canonicalize(dbFile);
+        candidates.put(canonical.getAbsolutePath().toLowerCase(), canonical);
+    }
+
+    private static boolean modrinthDatabaseContainsProfile(File dbFile, String profilePath) {
+        try (java.sql.Connection conn = openModrinthDb(dbFile)) {
+            if (modrinthUsesCurrentSchema(conn)) {
+                try (java.sql.PreparedStatement ps = conn.prepareStatement(
+                        "SELECT 1 FROM instances WHERE path = ?")) {
+                    ps.setString(1, profilePath);
+                    try (java.sql.ResultSet rs = ps.executeQuery()) {
+                        return rs.next();
+                    }
+                }
+            }
+            try (java.sql.PreparedStatement ps = conn.prepareStatement(
+                    "SELECT 1 FROM profiles WHERE path = ?")) {
+                ps.setString(1, profilePath);
+                try (java.sql.ResultSet rs = ps.executeQuery()) {
+                    return rs.next();
+                }
+            }
+        } catch (Exception ignored) {
+            return false;
+        }
     }
 
     private static File canonicalize(File f) {
@@ -346,41 +419,100 @@ public class Main {
 
     private static InstallResult installForModrinthProfile(File stableJar, ModrinthInstance modrinth) {
         return withModrinthDb(modrinth, conn -> {
-            String existing = readModrinthHook(conn, modrinth.profilePath);
+            ModrinthHook hook = readModrinthHook(conn, modrinth.profilePath);
+            if (hook == null) return profileNotFound(modrinth.profilePath);
+            String existing = hook.existingValue;
             if (existing != null && !existing.trim().isEmpty() && !isOurModrinthHook(existing)) {
                 return foreignHookError(modrinth, existing);
             }
-            return writeModrinthHook(conn, modrinth.profilePath, modrinthWrapperCommand(stableJar));
+            return writeModrinthHook(conn, modrinth.profilePath, hook, modrinthWrapperCommand(stableJar));
         });
     }
 
     private static InstallResult clearModrinthPreLaunchHook(ModrinthInstance modrinth) {
-        return withModrinthDb(modrinth, conn -> writeModrinthHook(conn, modrinth.profilePath, null));
+        return withModrinthDb(modrinth, conn -> {
+            ModrinthHook hook = readModrinthHook(conn, modrinth.profilePath);
+            return hook == null ? profileNotFound(modrinth.profilePath)
+                : writeModrinthHook(conn, modrinth.profilePath, hook, null);
+        });
     }
 
     private static InstallResult withModrinthDb(ModrinthInstance modrinth, ModrinthSqlOp op) {
         if (!modrinth.dbFile.exists()) {
             return new InstallResult(false, "Modrinth App database not found at: " + modrinth.dbFile.getAbsolutePath());
         }
-        try (java.sql.Connection conn = java.sql.DriverManager.getConnection("jdbc:sqlite:" + modrinth.dbFile.getAbsolutePath())) {
+        try (java.sql.Connection conn = openModrinthDb(modrinth.dbFile)) {
             return op.run(conn);
         } catch (Exception e) {
             return new InstallResult(false, "Modrinth database error: " + e.getMessage());
         }
     }
 
-    /** Returns the override_hook_pre_launch value, or null when the row is absent. */
-    private static String readModrinthHook(java.sql.Connection conn, String profilePath) throws java.sql.SQLException {
+    private static java.sql.Connection openModrinthDb(File dbFile) throws java.sql.SQLException {
+        java.sql.Connection conn = java.sql.DriverManager.getConnection("jdbc:sqlite:" + dbFile.getAbsolutePath());
+        try (java.sql.Statement statement = conn.createStatement()) {
+            statement.execute("PRAGMA busy_timeout = 30000");
+        }
+        return conn;
+    }
+
+    private static boolean modrinthUsesCurrentSchema(java.sql.Connection conn) throws java.sql.SQLException {
         try (java.sql.PreparedStatement ps = conn.prepareStatement(
-                "SELECT override_hook_pre_launch FROM profiles WHERE path = ?")) {
-            ps.setString(1, profilePath);
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'instances'")) {
             try (java.sql.ResultSet rs = ps.executeQuery()) {
-                return rs.next() ? rs.getString(1) : null;
+                return rs.next();
             }
         }
     }
 
-    private static InstallResult writeModrinthHook(java.sql.Connection conn, String profilePath, String value) throws java.sql.SQLException {
+    /** Returns the hook record, or null when the profile/instance is absent. */
+    private static ModrinthHook readModrinthHook(java.sql.Connection conn, String profilePath) throws java.sql.SQLException {
+        if (modrinthUsesCurrentSchema(conn)) {
+            try (java.sql.PreparedStatement ps = conn.prepareStatement(
+                    // Modrinth stores this column as SQLite JSONB. json(...) converts
+                    // the binary representation back to text before Gson parses it.
+                    "SELECT instances.id, json(instance_launch_overrides.overrides) " +
+                    "FROM instances LEFT JOIN instance_launch_overrides " +
+                    "ON instance_launch_overrides.instance_id = instances.id WHERE instances.path = ?")) {
+                ps.setString(1, profilePath);
+                try (java.sql.ResultSet rs = ps.executeQuery()) {
+                    if (!rs.next()) return null;
+                    JsonObject overrides = parseModrinthOverrides(rs.getString(2));
+                    JsonObject hooks = getModrinthHooks(overrides, false);
+                    String existing = hooks == null ? null : jsonString(hooks.get("pre_launch"));
+                    return new ModrinthHook(true, rs.getString(1), existing, overrides);
+                }
+            }
+        }
+        try (java.sql.PreparedStatement ps = conn.prepareStatement(
+                "SELECT override_hook_pre_launch FROM profiles WHERE path = ?")) {
+            ps.setString(1, profilePath);
+            try (java.sql.ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? new ModrinthHook(false, null, rs.getString(1), null) : null;
+            }
+        }
+    }
+
+    private static InstallResult writeModrinthHook(java.sql.Connection conn, String profilePath, ModrinthHook hook, String value) throws java.sql.SQLException {
+        if (hook.currentSchema) {
+            JsonObject hooks = getModrinthHooks(hook.overrides, value != null);
+            if (value == null) {
+                if (hooks != null) {
+                    hooks.remove("pre_launch");
+                    if (hooks.entrySet().isEmpty()) hook.overrides.remove("hooks");
+                }
+            } else {
+                hooks.addProperty("pre_launch", value);
+            }
+            try (java.sql.PreparedStatement ps = conn.prepareStatement(
+                    "INSERT INTO instance_launch_overrides (instance_id, overrides) VALUES (?, jsonb(?)) " +
+                    "ON CONFLICT(instance_id) DO UPDATE SET overrides = excluded.overrides")) {
+                ps.setString(1, hook.instanceId);
+                ps.setString(2, hook.overrides.toString());
+                ps.executeUpdate();
+            }
+            return new InstallResult(true, null);
+        }
         try (java.sql.PreparedStatement ps = conn.prepareStatement(
                 "UPDATE profiles SET override_hook_pre_launch = ? WHERE path = ?")) {
             ps.setString(1, value);
@@ -388,6 +520,31 @@ public class Main {
             if (ps.executeUpdate() == 0) return profileNotFound(profilePath);
         }
         return new InstallResult(true, null);
+    }
+
+    private static JsonObject parseModrinthOverrides(String value) throws java.sql.SQLException {
+        if (value == null || value.trim().isEmpty() || value.trim().equals("null")) return new JsonObject();
+        try {
+            JsonElement parsed = JsonParser.parseString(value);
+            if (!parsed.isJsonObject()) throw new IllegalArgumentException("launch overrides are not a JSON object");
+            return parsed.getAsJsonObject();
+        } catch (Exception e) {
+            throw new java.sql.SQLException("Invalid Modrinth launch overrides JSON", e);
+        }
+    }
+
+    private static JsonObject getModrinthHooks(JsonObject overrides, boolean create) {
+        JsonElement hooksElement = overrides.get("hooks");
+        if (hooksElement != null && hooksElement.isJsonObject()) return hooksElement.getAsJsonObject();
+        if (!create) return null;
+        JsonObject hooks = new JsonObject();
+        overrides.add("hooks", hooks);
+        return hooks;
+    }
+
+    private static String jsonString(JsonElement value) {
+        return value != null && value.isJsonPrimitive() && value.getAsJsonPrimitive().isString()
+            ? value.getAsString() : null;
     }
 
     private static InstallResult profileNotFound(String profilePath) {
