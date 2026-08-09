@@ -53,7 +53,9 @@ import java.nio.file.StandardOpenOption;
  * 
  * Two-phase execution model:
  * - Launcher Mode (default): Spawns watcher process and exits immediately with code 0
- * - Watcher Mode (--watcher): Polls for Java process, waits for window, injects DLLs
+ * - Watcher Mode (--watcher): Polls for the Minecraft JVM and injects DLLs as
+ *   soon as it is identified, before native graphics initialization can race
+ *   ahead of the injector.
  * - Info Mode (--info): Prints information about embedded DLLs
  */
 public class Main {
@@ -72,8 +74,7 @@ public class Main {
     private static final String DLL_RESOURCE_PATH = "dlls/";
     private static final String LOGGER_DLL_NAME = "liblogger_x64.dll";
     private static final String LOG_FILE = "injector.log";
-    private static final int POLL_INTERVAL_MS = 500;
-    private static final int TARGET_LEAF_RECHECK_INTERVAL_MS = 2000;
+    private static final int POLL_INTERVAL_MS = 100;
     private static final int TIMEOUT_SECONDS = 120;
     
     private static PrintWriter logWriter = null;
@@ -3844,7 +3845,8 @@ public class Main {
                     JarEntry entry = entries.nextElement();
                     String name = entry.getName();
                     
-                    if (name.startsWith(DLL_RESOURCE_PATH) && name.toLowerCase().endsWith(".dll")) {
+                    if (name.startsWith(DLL_RESOURCE_PATH) &&
+                        (name.toLowerCase().endsWith(".dll") || name.toLowerCase().endsWith(".json"))) {
                         String dllName = name.substring(DLL_RESOURCE_PATH.length());
                         if (dllName.isEmpty() || dllName.contains("/")) {
                             continue;
@@ -4301,7 +4303,11 @@ public class Main {
             log("[" + PROJECT_NAME + "] Our PID: " + ourPid);
             log("[" + PROJECT_NAME + "] Parent PID: " + ourParentPid);
 
-            // Poll for Java process whose working directory matches any of our target directories
+            // Poll for a Java process whose working directory matches one of
+            // our target directories. Do not wait for a visible window after
+            // finding it: Vulkan can create its instance before that point,
+            // which is too late for an injected implicit layer to participate
+            // in the application's device dispatch chain.
             long startTime = System.currentTimeMillis();
             long timeoutMs = TIMEOUT_SECONDS * 1000L;
             int javaProcessId = 0;
@@ -4310,121 +4316,103 @@ public class Main {
 
             int pollCount = 0;
 
-            long nextLeafRecheckAt = 0L;
-            boolean loggedWindowWaitForCurrentTarget = false;
+            while (javaProcessId == 0) {
+                List<ProcessUtils.ProcessInfo> currentProcs = ProcessUtils.findJavaLeafProcesses();
+                log("[" + PROJECT_NAME + "] Poll #" + (pollCount + 1) + ": found " + currentProcs.size() + " Java leaf process(es)");
 
-            while (true) {
-                while (javaProcessId == 0) {
-                    List<ProcessUtils.ProcessInfo> currentProcs = ProcessUtils.findJavaLeafProcesses();
-                    log("[" + PROJECT_NAME + "] Poll #" + (pollCount + 1) + ": found " + currentProcs.size() + " Java leaf process(es)");
+                for (ProcessUtils.ProcessInfo proc : currentProcs) {
+                    log("[" + PROJECT_NAME + "] Inspecting PID " + proc.processId + " (" + proc.exeName + ")");
 
-                    for (ProcessUtils.ProcessInfo proc : currentProcs) {
-                        log("[" + PROJECT_NAME + "] Inspecting PID " + proc.processId + " (" + proc.exeName + ")");
-
-                        // Skip ourselves
-                        if (proc.processId == ourPid) {
-                            log("[" + PROJECT_NAME + "] Skipping PID " + proc.processId + " (this watcher process)");
-                            continue;
-                        }
-
-                        // Skip launcher parent process
-                        if (ourParentPid != 0 && proc.processId == ourParentPid) {
-                            log("[" + PROJECT_NAME + "] Skipping PID " + proc.processId + " (launcher parent process)");
-                            continue;
-                        }
-
-                        String procCmdLine = ProcessUtils.getProcessCommandLine(proc.processId);
-
-                        // Skip PIDs we've already verified don't match
-                        if (checkedPids.contains(proc.processId)) {
-                            log("[" + PROJECT_NAME + "] Skipping PID " + proc.processId + " (already checked and not a target)");
-                            continue;
-                        }
-
-                        // Check working directory for this process
-                        String procCwd = ProcessUtils.getProcessWorkingDirectory(proc.processId);
-                        log("[" + PROJECT_NAME + "] PID " + proc.processId + " cwd(raw)='" + procCwd + "'");
-
-                        String normalizedProcCwd = normalizePathForCompare(procCwd);
-                        log("[" + PROJECT_NAME + "] PID " + proc.processId + " cwd(normalized)='" + normalizedProcCwd + "'");
-                        if (!normalizedProcCwd.isEmpty() && targetDirs.contains(normalizedProcCwd)) {
-                            String procInstId = ProcessUtils.getProcessEnvVar(proc.processId, "INST_ID");
-                            boolean instIdMismatch = !thisInstId.isEmpty() && !procInstId.isEmpty() && !thisInstId.equals(procInstId);
-                            if (instIdMismatch) {
-                                log("[" + PROJECT_NAME + "] PID " + proc.processId + " rejected (INST_ID mismatch)");
-                                checkedPids.add(proc.processId);
-                                continue;
-                            }
-
-                            if (!isLikelyMinecraftCommandLine(procCmdLine)) {
-                                log("[" + PROJECT_NAME + "] PID " + proc.processId + " rejected (not a Minecraft-like JVM command line)");
-                                checkedPids.add(proc.processId);
-                                continue;
-                            }
-
-                            log("[" + PROJECT_NAME + "] Found matching process: PID " + proc.processId + " (" + proc.exeName + ") with cwd=" + procCwd);
-                            javaProcessId = proc.processId;
-                            targetProcessCmdLine = procCmdLine;
-                            nextLeafRecheckAt = System.currentTimeMillis() + TARGET_LEAF_RECHECK_INTERVAL_MS;
-                            loggedWindowWaitForCurrentTarget = false;
-                            break;
-                        } else if (!normalizedProcCwd.isEmpty()) {
-                            // Working directory doesn't match - remember we checked it
-                            log("[" + PROJECT_NAME + "] PID " + proc.processId + " has cwd='" + procCwd + "' (not a match)");
-                            checkedPids.add(proc.processId);
-                        }
-                        // If procCwd is empty, the process might still be initializing - check again next cycle
-                    }
-
-                    pollCount++;
-
-                    if (pollCount % 10 == 0) {
-                        log("[" + PROJECT_NAME + "] Still searching... poll #" + pollCount + ", elapsed: " + ((System.currentTimeMillis() - startTime) / 1000) + "s");
-                        log("[" + PROJECT_NAME + "] Java processes: " + currentProcs.size() + ", already checked: " + checkedPids.size());
-                    }
-
-                    if (javaProcessId != 0) {
-                        break;
-                    }
-
-                    if (System.currentTimeMillis() - startTime > timeoutMs) {
-                        log("[" + PROJECT_NAME + "] Timeout waiting for Java process in instance directories");
-                        log("[" + PROJECT_NAME + "] Checked " + checkedPids.size() + " processes, none matched");
-                        closeLogging();
-                        return 1;
-                    }
-
-                    sleep(POLL_INTERVAL_MS);
-                }
-
-                if (!loggedWindowWaitForCurrentTarget) {
-                    log("[" + PROJECT_NAME + "] Waiting for process to create a window...");
-                    if (targetProcessCmdLine != null && !targetProcessCmdLine.trim().isEmpty()) {
-                        log("[" + PROJECT_NAME + "] Target command line: " + targetProcessCmdLine);
-                    }
-                    loggedWindowWaitForCurrentTarget = true;
-                }
-
-                String windowTitle = ProcessUtils.getVisibleTopLevelWindowTitle(javaProcessId);
-                if (windowTitle != null && !windowTitle.trim().isEmpty()) {
-                    log("[" + PROJECT_NAME + "] Window detected: '" + windowTitle + "'");
-                    break;
-                }
-
-                long now = System.currentTimeMillis();
-                if (now >= nextLeafRecheckAt) {
-                    nextLeafRecheckAt = now + TARGET_LEAF_RECHECK_INTERVAL_MS;
-                    if (!ProcessUtils.isJavaLeafProcess(javaProcessId)) {
-                        log("[" + PROJECT_NAME + "] Target PID " + javaProcessId + " is no longer a Java leaf process; rescanning all windows/processes");
-                        javaProcessId = 0;
-                        targetProcessCmdLine = "";
-                        checkedPids.clear();
+                    // Skip ourselves
+                    if (proc.processId == ourPid) {
+                        log("[" + PROJECT_NAME + "] Skipping PID " + proc.processId + " (this watcher process)");
                         continue;
                     }
+
+                    // Skip launcher parent process
+                    if (ourParentPid != 0 && proc.processId == ourParentPid) {
+                        log("[" + PROJECT_NAME + "] Skipping PID " + proc.processId + " (launcher parent process)");
+                        continue;
+                    }
+
+                    String procCmdLine = ProcessUtils.getProcessCommandLine(proc.processId);
+
+                    // Skip PIDs we've already verified don't match
+                    if (checkedPids.contains(proc.processId)) {
+                        log("[" + PROJECT_NAME + "] Skipping PID " + proc.processId + " (already checked and not a target)");
+                        continue;
+                    }
+
+                    // Check working directory for this process
+                    String procCwd = ProcessUtils.getProcessWorkingDirectory(proc.processId);
+                    log("[" + PROJECT_NAME + "] PID " + proc.processId + " cwd(raw)='" + procCwd + "'");
+
+                    String normalizedProcCwd = normalizePathForCompare(procCwd);
+                    log("[" + PROJECT_NAME + "] PID " + proc.processId + " cwd(normalized)='" + normalizedProcCwd + "'");
+                    if (!normalizedProcCwd.isEmpty() && targetDirs.contains(normalizedProcCwd)) {
+                        String procInstId = ProcessUtils.getProcessEnvVar(proc.processId, "INST_ID");
+                        boolean instIdMismatch = !thisInstId.isEmpty() && !procInstId.isEmpty() && !thisInstId.equals(procInstId);
+                        if (instIdMismatch) {
+                            log("[" + PROJECT_NAME + "] PID " + proc.processId + " rejected (INST_ID mismatch)");
+                            checkedPids.add(proc.processId);
+                            continue;
+                        }
+
+                        if (!isLikelyMinecraftCommandLine(procCmdLine)) {
+                            log("[" + PROJECT_NAME + "] PID " + proc.processId + " rejected (not a Minecraft-like JVM command line)");
+                            checkedPids.add(proc.processId);
+                            continue;
+                        }
+
+                        ProcessUtils.JavaExecutableKind executableKind =
+                            ProcessUtils.classifyJavaExecutable(proc.processId);
+                        if (executableKind == ProcessUtils.JavaExecutableKind.WRAPPER) {
+                            log("[" + PROJECT_NAME + "] PID " + proc.processId +
+                                " deferred (Java launcher shim; waiting for its JVM child)");
+                            continue;
+                        }
+                        if (executableKind == ProcessUtils.JavaExecutableKind.UNKNOWN) {
+                            log("[" + PROJECT_NAME + "] PID " + proc.processId +
+                                " has an unrecognised Java executable layout; retaining legacy leaf fallback");
+                        }
+
+                        log("[" + PROJECT_NAME + "] Found matching process: PID " + proc.processId + " (" + proc.exeName + ") with cwd=" + procCwd);
+                        javaProcessId = proc.processId;
+                        targetProcessCmdLine = procCmdLine;
+                        break;
+                    } else if (!normalizedProcCwd.isEmpty()) {
+                        // Working directory doesn't match - remember we checked it
+                        log("[" + PROJECT_NAME + "] PID " + proc.processId + " has cwd='" + procCwd + "' (not a match)");
+                        checkedPids.add(proc.processId);
+                    }
+                    // If procCwd is empty, the process might still be initializing - check again next cycle
                 }
 
-                if (now - startTime > timeoutMs) {
-                    log("[" + PROJECT_NAME + "] Timeout waiting for window");
+                pollCount++;
+
+                if (pollCount % 10 == 0) {
+                    log("[" + PROJECT_NAME + "] Still searching... poll #" + pollCount + ", elapsed: " + ((System.currentTimeMillis() - startTime) / 1000) + "s");
+                    log("[" + PROJECT_NAME + "] Java processes: " + currentProcs.size() + ", already checked: " + checkedPids.size());
+                }
+
+                if (javaProcessId != 0) {
+                    // The first snapshot can catch a javaw.exe shim just
+                    // before it creates its child. Take a fresh snapshot
+                    // immediately before injection; this avoids the former
+                    // window wait without ever attaching to a parent wrapper.
+                    if (ProcessUtils.isJavaLeafProcess(javaProcessId)) {
+                        break;
+                    }
+                    log("[" + PROJECT_NAME + "] PID " + javaProcessId +
+                        " spawned a child before injection; rescanning for the real JVM");
+                    javaProcessId = 0;
+                    targetProcessCmdLine = "";
+                    checkedPids.clear();
+                }
+
+                if (System.currentTimeMillis() - startTime > timeoutMs) {
+                    log("[" + PROJECT_NAME + "] Timeout waiting for Java process in instance directories");
+                    log("[" + PROJECT_NAME + "] Checked " + checkedPids.size() + " processes, none matched");
                     closeLogging();
                     return 1;
                 }
@@ -4432,7 +4420,10 @@ public class Main {
                 sleep(POLL_INTERVAL_MS);
             }
 
-            sleep(500);
+            log("[" + PROJECT_NAME + "] Target identified; injecting immediately without waiting for a window.");
+            if (targetProcessCmdLine != null && !targetProcessCmdLine.trim().isEmpty()) {
+                log("[" + PROJECT_NAME + "] Target command line: " + targetProcessCmdLine);
+            }
 
             // Inject logger DLL first
             int successCount = 0;
@@ -4447,7 +4438,6 @@ public class Main {
                 if (result.success) {
                     log("[" + PROJECT_NAME + "] Logger DLL injected successfully");
                     successCount++;
-                    sleep(100);
                 } else {
                     log("[" + PROJECT_NAME + "] Failed to inject logger DLL: " + result.error);
                     log("[" + PROJECT_NAME + "] Error code: " + result.errorCode);
@@ -4466,7 +4456,6 @@ public class Main {
                     log("[" + PROJECT_NAME + "] Failed to inject " + dll.getFileName() + ": " + result.error);
                     log("[" + PROJECT_NAME + "] Error code: " + result.errorCode);
                 }
-                sleep(100);
             }
 
             log("[" + PROJECT_NAME + "] Injection complete: " + successCount + "/" + totalCount + " DLLs injected");
@@ -4525,7 +4514,8 @@ public class Main {
                     String name = entry.getName();
                     
                     // Look for DLLs in the dlls/ folder
-                    if (name.startsWith(DLL_RESOURCE_PATH) && name.toLowerCase().endsWith(".dll")) {
+                    if (name.startsWith(DLL_RESOURCE_PATH) &&
+                        (name.toLowerCase().endsWith(".dll") || name.toLowerCase().endsWith(".json"))) {
                         String dllName = name.substring(DLL_RESOURCE_PATH.length());
                         if (dllName.isEmpty() || dllName.contains("/")) {
                             continue; // Skip directories or nested files
@@ -4549,7 +4539,9 @@ public class Main {
                         }
                         
                         System.out.println("[" + PROJECT_NAME + "] Extracted: " + dllName);
-                        extractedDlls.add(outFile.toPath());
+                        if (dllName.toLowerCase().endsWith(".dll")) {
+                            extractedDlls.add(outFile.toPath());
+                        }
                     }
                 }
             } finally {

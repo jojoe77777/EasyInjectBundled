@@ -75,6 +75,7 @@
                 <targetPath>dlls</targetPath>
                 <includes>
                     <include>*.dll</include>
+                    <include>*.json</include>
                 </includes>
             </resource>
             <!-- Standard resources -->

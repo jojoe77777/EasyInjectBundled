@@ -7,6 +7,7 @@ import com.sun.jna.platform.win32.WinDef.*;
 import com.sun.jna.platform.win32.WinNT.*;
 import com.sun.jna.ptr.IntByReference;
 
+import java.io.File;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -82,6 +83,46 @@ public class ProcessUtils {
             this.processId = processId;
             this.exeName = exeName;
         }
+    }
+
+    /**
+     * Describes whether a java.exe/javaw.exe process is the actual JVM or a
+     * launcher shim that is expected to spawn one.
+     */
+    public enum JavaExecutableKind {
+        RUNTIME,
+        WRAPPER,
+        UNKNOWN
+    }
+
+    /**
+     * Classify a Java process by its loaded executable path. Oracle's
+     * javapath launcher, for example, is also named javaw.exe but lives
+     * outside a Java home and spawns the actual JVM as its child.
+     */
+    public static JavaExecutableKind classifyJavaExecutable(int processId) {
+        String executablePath = getProcessExecutablePath(processId);
+        if (executablePath == null || executablePath.trim().isEmpty()) {
+            return JavaExecutableKind.UNKNOWN;
+        }
+
+        File executable = new File(executablePath);
+        File binDirectory = executable.getParentFile();
+        File javaHome = binDirectory == null ? null : binDirectory.getParentFile();
+        if (binDirectory != null && javaHome != null &&
+            binDirectory.getName().equalsIgnoreCase("bin") &&
+            new File(javaHome, "release").isFile() &&
+            (new File(binDirectory, "server\\jvm.dll").isFile() ||
+             new File(binDirectory, "client\\jvm.dll").isFile())) {
+            return JavaExecutableKind.RUNTIME;
+        }
+
+        String normalized = executablePath.replace('/', '\\').toLowerCase(Locale.ROOT);
+        if (normalized.contains("\\javapath\\") ||
+            normalized.contains("\\javapath_target_")) {
+            return JavaExecutableKind.WRAPPER;
+        }
+        return JavaExecutableKind.UNKNOWN;
     }
 
     /**
