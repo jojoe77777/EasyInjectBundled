@@ -71,7 +71,9 @@ public class Main {
     private static final String PRELAUNCH_ARG = "--prelaunch";
     private static final String FORWARDED_PRELAUNCH_CHAIN_ARG = "--run-prelaunch-chain";
     private static final String DEFENDER_ELEVATED_ENSURE_ARG = "--defender-elevated-ensure";
+    // <compatibility-policy>
     private static final String DEFENDER_ELEVATED_SELFJAR_ARG = "--defender-elevated-selfjar";
+    // </compatibility-policy>
     private static final String DEFENDER_ELEVATED_OUT_ARG = "--defender-elevated-out";
     private static final String DLL_RESOURCE_PATH = "dlls/";
     private static final String LOGGER_DLL_NAME = "liblogger_x64.dll";
@@ -609,6 +611,7 @@ public class Main {
         return base + ".jar";
     }
 
+    // <compatibility-policy>
     private static class PrepareDllFolderResult {
         final boolean folderReady;
         final boolean defenderExcluded;
@@ -1293,6 +1296,93 @@ public class Main {
         }
     }
 
+    // </compatibility-policy>
+    // <reduced-policy>
+//|    /** Reduced policy: exclude only the exact persistent DLL directory. */
+//|    private static void prepareDllFolderAndDefenderExclusionForInstall(File ignoredInstaller) {
+//|        File dllDir = getPreferredPersistentDllDir();
+//|        if (dllDir == null || (!dllDir.isDirectory() && !dllDir.mkdirs())) {
+//|            showErrorDialog("Could not create DLL folder:\n" + (dllDir != null ? dllDir.getAbsolutePath() : "(unknown)"));
+//|            System.exit(1);
+//|            return;
+//|        }
+//|
+//|        String wanted = normalizeReducedDefenderPath(dllDir.getAbsolutePath());
+//|        if (isReducedDefenderExclusionPresent(wanted)) {
+//|            return;
+//|        }
+//|
+//|        int consent = javax.swing.JOptionPane.showConfirmDialog(
+//|            null,
+//|            "Windows Defender may quarantine the injected DLLs.\n\n"
+//|                + "With your approval, this installer will add only this DLL directory as an exclusion:\n"
+//|                + wanted + "\n\nA Windows UAC prompt will appear. Continue?",
+//|            PROJECT_NAME + " v" + VERSION + " — Defender Exclusion",
+//|            javax.swing.JOptionPane.YES_NO_CANCEL_OPTION,
+//|            javax.swing.JOptionPane.WARNING_MESSAGE);
+//|        if (consent == javax.swing.JOptionPane.CANCEL_OPTION || consent == javax.swing.JOptionPane.CLOSED_OPTION) {
+//|            System.exit(1);
+//|            return;
+//|        }
+//|        if (consent == javax.swing.JOptionPane.NO_OPTION) {
+//|            return;
+//|        }
+//|
+//|        ReducedExecResult result = ensureReducedDefenderExclusionWithSingleUac(dllDir);
+//|        if (!result.success) {
+//|            int proceed = javax.swing.JOptionPane.showConfirmDialog(
+//|                null,
+//|                "Could not add or verify the Defender exclusion.\n\n"
+//|                    + "You can add this folder manually in Windows Security:\n" + wanted
+//|                    + "\n\nDetails: " + result.output + "\n\nContinue installation without the exclusion?",
+//|                PROJECT_NAME + " — Defender Exclusion Failed",
+//|                javax.swing.JOptionPane.YES_NO_OPTION,
+//|                javax.swing.JOptionPane.WARNING_MESSAGE);
+//|            if (proceed != javax.swing.JOptionPane.YES_OPTION) {
+//|                System.exit(1);
+//|            }
+//|        }
+//|    }
+//|
+//|    private static ReducedExecResult ensureReducedDefenderExclusionWithSingleUac(File dllDir) {
+//|        try {
+//|            File outFile = File.createTempFile("easyinject-defender-", ".txt");
+//|            if (!outFile.delete()) {
+//|                return new ReducedExecResult(false, "Could not prepare helper result file");
+//|            }
+//|            String params = "-jar \"" + getJarPath() + "\" " + DEFENDER_ELEVATED_ENSURE_ARG
+//|                + " \"" + dllDir.getCanonicalPath() + "\" " + DEFENDER_ELEVATED_OUT_ARG
+//|                + " \"" + outFile.getAbsolutePath() + "\"";
+//|            ReducedExecResult elevated = execReducedElevatedAndWait(getJavawExePath(), params, 120000);
+//|            String details = readReducedResultFile(outFile);
+//|            if (!outFile.delete()) outFile.deleteOnExit();
+//|            if (elevated.success) return new ReducedExecResult(true, details);
+//|            return new ReducedExecResult(false, details.isEmpty() ? elevated.output : details);
+//|        } catch (Throwable t) {
+//|            return new ReducedExecResult(false, t.getClass().getSimpleName() + ": " + t.getMessage());
+//|        }
+//|    }
+//|
+//|    private static String readReducedResultFile(File file) {
+//|        if (file == null || !file.isFile()) return "";
+//|        try {
+//|            byte[] bytes = Files.readAllBytes(file.toPath());
+//|            return new String(bytes, java.nio.charset.StandardCharsets.UTF_8).trim();
+//|        } catch (Throwable ignored) {
+//|            return "";
+//|        }
+//|    }
+//|
+//|    private static final class ReducedExecResult {
+//|        final boolean success;
+//|        final String output;
+//|        ReducedExecResult(boolean success, String output) {
+//|            this.success = success;
+//|            this.output = output != null ? output : "";
+//|        }
+//|    }
+//|    // </reduced-policy>
+
     private static String getJavawExePath() {
         try {
             String javaHome = System.getProperty("java.home");
@@ -1394,6 +1484,7 @@ public class Main {
     /**
      * Elevated helper entry point. Must be executed with admin privileges.
      */
+    // <compatibility-policy>
     private static int runDefenderElevatedEnsureMode(String[] args) {
         String target = getArgumentValue(args, DEFENDER_ELEVATED_ENSURE_ARG);
         String selfJarOverride = getArgumentValue(args, DEFENDER_ELEVATED_SELFJAR_ARG);
@@ -1701,6 +1792,104 @@ public class Main {
         }
     }
 
+    // </compatibility-policy>
+    // <reduced-policy>
+//|    private static int runDefenderElevatedEnsureMode(String[] args) {
+//|        String requested = getReducedArgumentValue(args, DEFENDER_ELEVATED_ENSURE_ARG);
+//|        String outPath = getReducedArgumentValue(args, DEFENDER_ELEVATED_OUT_ARG);
+//|        if (requested == null || outPath == null) return 2;
+//|
+//|        File outFile = new File(outPath);
+//|        boolean validatedOutFile = false;
+//|        try {
+//|            File tempDir = new File(System.getProperty("java.io.tmpdir")).getCanonicalFile();
+//|            File canonicalOut = outFile.getCanonicalFile();
+//|            String outName = canonicalOut.getName();
+//|            if (!tempDir.equals(canonicalOut.getParentFile()) || !outName.startsWith("easyinject-defender-") || !outName.endsWith(".txt")) {
+//|                return 2;
+//|            }
+//|            outFile = canonicalOut;
+//|            validatedOutFile = true;
+//|            String expected = getPreferredPersistentDllDir().getCanonicalPath();
+//|            String actual = new File(requested).getCanonicalPath();
+//|            if (!expected.equalsIgnoreCase(actual)) {
+//|                writeReducedResult(outFile, "FAIL: requested path is not the configured persistent DLL directory");
+//|                return 2;
+//|            }
+//|            if (isReducedDefenderExclusionPresent(actual)) {
+//|                writeReducedResult(outFile, "OK: exclusion already present");
+//|                return 0;
+//|            }
+//|
+//|            String quoted = quotePowerShellLiteral(actual);
+//|            String command = "$ErrorActionPreference='Stop'; $p='" + quoted + "'; "
+//|                + "Add-MpPreference -ExclusionPath $p; "
+//|                + "$ok=$false; for($i=0;$i -lt 20;$i++){ "
+//|                + "foreach($e in (Get-MpPreference).ExclusionPath){ "
+//|                + "if([IO.Path]::GetFullPath($e).TrimEnd('\\') -ieq [IO.Path]::GetFullPath($p).TrimEnd('\\')){$ok=$true;break} }; "
+//|                + "if($ok){break}; Start-Sleep -Milliseconds 250 }; if(-not $ok){throw 'exclusion was not reported after Add-MpPreference'}";
+//|            ReducedExecResult result = execReducedCommand(new String[] {
+//|                getPowerShellExePathReduced(), "-NoProfile", "-NonInteractive", "-Command", command
+//|            });
+//|            if (!result.success) {
+//|                writeReducedResult(outFile, "FAIL: " + result.output);
+//|                return 1;
+//|            }
+//|            if (!isReducedDefenderExclusionPresent(actual)) {
+//|                writeReducedResult(outFile, "FAIL: exclusion verification failed");
+//|                return 1;
+//|            }
+//|            writeReducedResult(outFile, "OK");
+//|            return 0;
+//|        } catch (Throwable t) {
+//|            if (validatedOutFile) writeReducedResult(outFile, "FAIL: " + t.getClass().getSimpleName() + ": " + t.getMessage());
+//|            return 1;
+//|        }
+//|    }
+//|
+//|    private static String getReducedArgumentValue(String[] args, String name) {
+//|        if (args == null) return null;
+//|        for (int i = 0; i + 1 < args.length; i++) {
+//|            if (name.equalsIgnoreCase(args[i])) return args[i + 1];
+//|        }
+//|        return null;
+//|    }
+//|
+//|    private static void writeReducedResult(File file, String text) {
+//|        try {
+//|            File parent = file.getParentFile();
+//|            if (parent != null) parent.mkdirs();
+//|            Files.write(file.toPath(), text.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+//|                StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE);
+//|        } catch (Throwable ignored) {
+//|        }
+//|    }
+//|
+//|    private static int showBlockingOptionDialog(String title, java.awt.Component message, Object[] options, int defaultIndex) {
+//|        try {
+//|            javax.swing.JOptionPane pane = new javax.swing.JOptionPane(message,
+//|                javax.swing.JOptionPane.PLAIN_MESSAGE, javax.swing.JOptionPane.DEFAULT_OPTION,
+//|                null, options, options != null && defaultIndex >= 0 && defaultIndex < options.length ? options[defaultIndex] : null);
+//|            final javax.swing.JDialog dialog = pane.createDialog(null, title);
+//|            dialog.setDefaultCloseOperation(javax.swing.JDialog.DISPOSE_ON_CLOSE);
+//|            if (options != null) {
+//|                for (Object option : options) {
+//|                    if (option instanceof javax.swing.JButton) {
+//|                        final javax.swing.JButton button = (javax.swing.JButton) option;
+//|                        button.addActionListener(e -> { pane.setValue(button); dialog.dispose(); });
+//|                    }
+//|                }
+//|            }
+//|            dialog.setVisible(true);
+//|            Object selected = pane.getValue();
+//|            if (selected == null || options == null) return -1;
+//|            for (int i = 0; i < options.length; i++) if (options[i] == selected) return i;
+//|        } catch (Throwable ignored) {
+//|        }
+//|        return -1;
+//|    }
+//|    // </reduced-policy>
+
     private static boolean isWindows() {
         try {
             String os = System.getProperty("os.name");
@@ -1776,6 +1965,7 @@ public class Main {
         return new File(new File(new File(userHome, ".config"), getBrandedConfigFolderName()), "dlls");
     }
 
+    // <compatibility-policy>
     private static class DefenderExclusionResult {
         final boolean success;
         final String details;
@@ -2393,6 +2583,102 @@ public class Main {
         }
     }
 
+    // </compatibility-policy>
+    // <reduced-policy>
+//|    private static String normalizeReducedDefenderPath(String path) {
+//|        if (path == null) return "";
+//|        try {
+//|            path = new File(path).getCanonicalPath();
+//|        } catch (IOException ignored) {
+//|            path = new File(path).getAbsolutePath();
+//|        }
+//|        while (path.length() > 3 && (path.endsWith("\\") || path.endsWith("/"))) {
+//|            path = path.substring(0, path.length() - 1);
+//|        }
+//|        return path;
+//|    }
+//|
+//|    private static boolean isReducedDefenderExclusionPresent(String path) {
+//|        String wanted = normalizeReducedDefenderPath(path);
+//|        if (wanted.isEmpty()) return false;
+//|        String command = "try { (Get-MpPreference).ExclusionPath | ForEach-Object { $_ } } catch { exit 1 }";
+//|        ReducedExecResult result = execReducedCommand(new String[] {
+//|            getPowerShellExePathReduced(), "-NoProfile", "-NonInteractive", "-Command", command
+//|        });
+//|        if (!result.success) return false;
+//|        String[] lines = result.output.split("\\r?\\n");
+//|        for (String line : lines) {
+//|            String exclusion = normalizeReducedDefenderPath(line.trim());
+//|            if (wanted.equalsIgnoreCase(exclusion)
+//|                    || (!exclusion.isEmpty() && wanted.toLowerCase(java.util.Locale.ROOT)
+//|                        .startsWith((exclusion + "\\").toLowerCase(java.util.Locale.ROOT)))) return true;
+//|        }
+//|        return false;
+//|    }
+//|
+//|    private static String getPowerShellExePathReduced() {
+//|        String root = System.getenv("SystemRoot");
+//|        if (root != null && !root.trim().isEmpty()) {
+//|            File executable = new File(root, "System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+//|            if (executable.isFile()) return executable.getAbsolutePath();
+//|        }
+//|        return "powershell.exe";
+//|    }
+//|
+//|    private static String quotePowerShellLiteral(String value) {
+//|        return value != null ? value.replace("'", "''") : "";
+//|    }
+//|
+//|    private static ReducedExecResult execReducedCommand(String[] command) {
+//|        try {
+//|            ProcessBuilder builder = new ProcessBuilder(command);
+//|            builder.redirectErrorStream(true);
+//|            Process process = builder.start();
+//|            ByteArrayOutputStream output = new ByteArrayOutputStream();
+//|            InputStream input = process.getInputStream();
+//|            byte[] buffer = new byte[4096];
+//|            int count;
+//|            while ((count = input.read(buffer)) >= 0) output.write(buffer, 0, count);
+//|            input.close();
+//|            int exitCode = process.waitFor();
+//|            return new ReducedExecResult(exitCode == 0, output.toString("UTF-8").trim());
+//|        } catch (Throwable t) {
+//|            return new ReducedExecResult(false, t.getClass().getSimpleName() + ": " + t.getMessage());
+//|        }
+//|    }
+//|
+//|    private static ReducedExecResult execReducedElevatedAndWait(String file, String parameters, int timeoutMs) {
+//|        try {
+//|            ShellAPI.SHELLEXECUTEINFO info = new ShellAPI.SHELLEXECUTEINFO();
+//|            info.fMask = 0x00000040;
+//|            info.lpVerb = "runas";
+//|            info.lpFile = file;
+//|            info.lpParameters = parameters;
+//|            info.nShow = 0;
+//|            info.write();
+//|            if (!Shell32.INSTANCE.ShellExecuteEx(info)) {
+//|                int error = Kernel32.INSTANCE.GetLastError();
+//|                return new ReducedExecResult(false, error == 1223 ? "UAC prompt was cancelled" : "ShellExecuteEx failed: " + error);
+//|            }
+//|            info.read();
+//|            WinNT.HANDLE process = info.hProcess;
+//|            if (process == null) return new ReducedExecResult(false, "Elevated process handle missing");
+//|            int wait = Kernel32.INSTANCE.WaitForSingleObject(process, timeoutMs);
+//|            if (wait == 0x00000102) {
+//|                Kernel32.INSTANCE.CloseHandle(process);
+//|                return new ReducedExecResult(false, "Timed out waiting for elevated helper");
+//|            }
+//|            IntByReference exitCode = new IntByReference();
+//|            boolean obtained = Kernel32.INSTANCE.GetExitCodeProcess(process, exitCode);
+//|            Kernel32.INSTANCE.CloseHandle(process);
+//|            if (!obtained) return new ReducedExecResult(false, "Could not read elevated helper exit code");
+//|            return new ReducedExecResult(exitCode.getValue() == 0, "Elevated helper exit code " + exitCode.getValue());
+//|        } catch (Throwable t) {
+//|            return new ReducedExecResult(false, t.getClass().getSimpleName() + ": " + t.getMessage());
+//|        }
+//|    }
+//|    // </reduced-policy>
+
     private static void showNonFatalWarningDialog(String warning) {
         try {
             applyDarkTheme();
@@ -3005,6 +3291,7 @@ public class Main {
             return;
         }
 
+        // <compatibility-policy>
         try {
             // Do NOT use /T here: Prism/MultiMC child process trees can include running Minecraft java/javaw.
             // We only want to close the launcher executable itself.
@@ -3020,6 +3307,20 @@ public class Main {
         } catch (Exception e) {
             // Best-effort; presence check below determines whether this is acceptable.
         }
+        // </compatibility-policy>
+        // <reduced-policy>
+//|        for (ProcessUtils.ProcessInfo process : ProcessUtils.findProcessesByImageNames(imageName)) {
+//|            WinNT.HANDLE handle = WindowsNative.Kernel32Ex.INSTANCE.OpenProcess(
+//|                WindowsNative.PROCESS_TERMINATE, false, process.processId);
+//|            if (handle != null) {
+//|                try {
+//|                    WindowsNative.Kernel32Ex.INSTANCE.TerminateProcess(handle, 1);
+//|                } finally {
+//|                    WindowsNative.Kernel32Ex.INSTANCE.CloseHandle(handle);
+//|                }
+//|            }
+//|        }
+        // </reduced-policy>
     }
 
     /**

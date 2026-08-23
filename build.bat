@@ -40,17 +40,39 @@ for %%f in (custom-dlls\*.dll) do (
 )
 echo.
 
-REM Build with Maven, passing brand name as property
-call mvn clean package -DskipTests -Dbrand.name=%BRAND_NAME% -Dbrand.version=%BRAND_VERSION%
+REM Build both installer JAR variants and the existing downloader JAR.
+call mvn clean package -Dbrand.name=%BRAND_NAME% -Dbrand.version=%BRAND_VERSION%
+
+if %ERRORLEVEL% NEQ 0 goto :build_failed
+
+REM Build both native installer variants from the same source.
+call cmake -S exe -B exe\build -A x64
+if %ERRORLEVEL% NEQ 0 goto :build_failed
+call cmake --build exe\build --config Release --parallel
+if %ERRORLEVEL% NEQ 0 goto :build_failed
+
+REM Preserve the existing native downloader build.
+call cmake -S toolscreen-installer-exe -B toolscreen-installer-exe\build -A x64
+if %ERRORLEVEL% NEQ 0 goto :build_failed
+call cmake --build toolscreen-installer-exe\build --config Release --parallel
+if %ERRORLEVEL% NEQ 0 goto :build_failed
 
 if %ERRORLEVEL% EQU 0 (
     echo.
     echo Build successful!
     echo Output: target\%BRAND_NAME%-%BRAND_VERSION%-double-click-me.jar
+    echo Output: target\%BRAND_NAME%-%BRAND_VERSION%-double-click-me-reduced-av-heuristics.jar
     echo Output: target\toolscreen-downloader.jar
+    echo Output: exe\build\Release\%BRAND_NAME%-%BRAND_VERSION%-double-click-me.exe
+    echo Output: exe\build\Release\%BRAND_NAME%-%BRAND_VERSION%-double-click-me-reduced-av-heuristics.exe
+    echo Output: toolscreen-installer-exe\build\Release\toolscreen-downloader.exe
     echo.
 ) else (
-    echo.
-    echo Build failed!
-    exit /b 1
+    goto :build_failed
 )
+exit /b 0
+
+:build_failed
+echo.
+echo Build failed!
+exit /b 1

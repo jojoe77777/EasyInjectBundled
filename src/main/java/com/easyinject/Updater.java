@@ -153,7 +153,8 @@ public final class Updater {
             return false;
         }
 
-        Asset asset = chooseAsset(latest.assetsJson, assetNameRegex, targetJar.getName());
+        String canonicalAssetName = BuildVariant.canonicalJarAssetName(props, remoteVersion);
+        Asset asset = chooseAsset(latest.assetsJson, canonicalAssetName, assetNameRegex, targetJar.getName());
         if (asset == null || asset.browserDownloadUrl == null) {
             log(logSink, "Update found but no matching .jar asset was found");
             JOptionPane.showMessageDialog(
@@ -396,9 +397,15 @@ public final class Updater {
         return new LatestRelease(tag, assets);
     }
 
-    private static Asset chooseAsset(JsonArray assetsJson, String assetNameRegex, String currentJarName) {
+    static Asset chooseAsset(JsonArray assetsJson, String canonicalAssetName, String assetNameRegex, String currentJarName) {
         if (assetsJson == null || assetsJson.size() == 0) {
             return null;
+        }
+
+        // Variant identity wins over release ordering and legacy broad regexes.
+        Asset exact = findAssetByName(assetsJson, canonicalAssetName);
+        if (exact != null) {
+            return exact;
         }
 
         Pattern pat = null;
@@ -414,7 +421,7 @@ public final class Updater {
         if (pat != null) {
             for (JsonElement e : assetsJson) {
                 Asset a = assetFromJson(e);
-                if (a != null && a.name != null && pat.matcher(a.name).matches()) {
+                if (a != null && a.name != null && BuildVariant.acceptsJarAssetName(a.name) && pat.matcher(a.name).matches()) {
                     return a;
                 }
             }
@@ -425,7 +432,7 @@ public final class Updater {
             String cur = currentJarName.trim();
             for (JsonElement e : assetsJson) {
                 Asset a = assetFromJson(e);
-                if (a != null && a.name != null && a.name.equalsIgnoreCase(cur)) {
+                if (a != null && a.name != null && BuildVariant.acceptsJarAssetName(a.name) && a.name.equalsIgnoreCase(cur)) {
                     return a;
                 }
             }
@@ -434,11 +441,28 @@ public final class Updater {
         // Third pass: any .jar
         for (JsonElement e : assetsJson) {
             Asset a = assetFromJson(e);
-            if (a != null && a.name != null && a.name.toLowerCase().endsWith(".jar")) {
+            if (a != null && a.name != null && BuildVariant.acceptsJarAssetName(a.name)) {
                 return a;
             }
         }
 
+        return null;
+    }
+
+    static String chooseAssetNameForTest(String assetsJson, String canonicalAssetName, String assetNameRegex, String currentJarName) {
+        JsonElement parsed = JsonParser.parseString(assetsJson);
+        Asset selected = chooseAsset(parsed.getAsJsonArray(), canonicalAssetName, assetNameRegex, currentJarName);
+        return selected != null ? selected.name : null;
+    }
+
+    private static Asset findAssetByName(JsonArray assetsJson, String name) {
+        if (name == null || name.trim().isEmpty()) return null;
+        for (JsonElement element : assetsJson) {
+            Asset asset = assetFromJson(element);
+            if (asset != null && asset.name != null && asset.name.equalsIgnoreCase(name.trim())) {
+                return asset;
+            }
+        }
         return null;
     }
 

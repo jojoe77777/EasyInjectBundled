@@ -70,7 +70,9 @@ static const wchar_t* INFO_ARG           = L"--info";
 static const wchar_t* PRELAUNCH_ARG      = L"--prelaunch";
 static const wchar_t* FORWARDED_PRELAUNCH_CHAIN_ARG = L"--run-prelaunch-chain";
 static const wchar_t* DEFENDER_ELEVATED_ENSURE_ARG   = L"--defender-elevated-ensure";
+#if !defined(EASYINJECT_REDUCED_AV_HEURISTICS)
 static const wchar_t* DEFENDER_ELEVATED_SELFEXE_ARG  = L"--defender-elevated-selfexe";
+#endif
 static const wchar_t* DEFENDER_ELEVATED_OUT_ARG      = L"--defender-elevated-out";
 static const wchar_t* LOGGER_DLL_NAME   = L"liblogger_x64.dll";
 static const wchar_t* LOG_FILE_NAME     = L"injector.log";
@@ -1342,6 +1344,7 @@ static std::wstring getPowerShellExePath() {
     return L"powershell.exe";
 }
 
+#if !defined(EASYINJECT_REDUCED_AV_HEURISTICS)
 static std::wstring getRegExePath() {
     wchar_t root[MAX_PATH];
     DWORD n = GetEnvironmentVariableW(L"SystemRoot", root, MAX_PATH);
@@ -1351,6 +1354,7 @@ static std::wstring getRegExePath() {
     }
     return L"reg.exe";
 }
+#endif
 
 static std::string readTextFile(const fs::path& p) {
     std::ifstream f(p, std::ios::binary);
@@ -1747,7 +1751,13 @@ static InjectionResult injectDll(DWORD processId, const fs::path& dllPath) {
     if (!fs::exists(dllPath))
         return {false, "DLL file does not exist: " + dllPath.string(), 0};
 
-    HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, processId);
+#if defined(EASYINJECT_REDUCED_AV_HEURISTICS)
+    constexpr DWORD injectionAccess = PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION
+        | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ;
+#else
+    constexpr DWORD injectionAccess = PROCESS_ALL_ACCESS;
+#endif
+    HANDLE hProcess = OpenProcess(injectionAccess, FALSE, processId);
     if (!hProcess)
         return {false, "OpenProcess failed: " + getErrorMessage(GetLastError()), GetLastError()};
 
@@ -1813,6 +1823,7 @@ static InjectionResult injectDll(DWORD processId, const fs::path& dllPath) {
 // ============================================================================
 namespace Defender {
 
+#if !defined(EASYINJECT_REDUCED_AV_HEURISTICS)
 static bool isExclusionPresentViaRegistry(const std::wstring& path) {
     std::wstring wanted = normalizeDefenderPath(path);
     if (wanted.empty()) return false;
@@ -1976,6 +1987,107 @@ static ExclusionResult ensureExclusionWithSingleUac(const fs::path& dir, const f
     if (!out.empty()) details += ": " + trim(out);
     return {false, details};
 }
+
+#else
+
+static std::wstring quotePowerShellLiteral(const std::wstring& value) {
+    std::wstring result;
+    result.reserve(value.size());
+    for (wchar_t ch : value) {
+        result.push_back(ch);
+        if (ch == L'\'') result.push_back(L'\'');
+    }
+    return result;
+}
+
+static bool isExclusionPresent(const std::wstring& path) {
+    std::wstring wanted = normalizeDefenderPath(path);
+    if (wanted.empty()) return false;
+    std::wstring ps = getPowerShellExePath();
+    std::wstring cmd = L"\"" + ps + L"\" -NoProfile -NonInteractive -Command "
+        L"\"try { (Get-MpPreference).ExclusionPath | ForEach-Object { $_ } } catch { exit 1 }\"";
+    auto result = execCommandCapture(cmd);
+    if (result.exitCode != 0) return false;
+    for (const auto& line : splitLines(result.output)) {
+        std::wstring exclusion = normalizeDefenderPath(toWide(trim(line)));
+        if (!exclusion.empty() && isPathCoveredByExclusion(exclusion, wanted)) return true;
+    }
+    return false;
+}
+
+static int runElevatedEnsureMode(const std::wstring& target, const std::wstring& outPath) {
+    try {
+        std::error_code outEc;
+        std::error_code tempEc;
+        fs::path canonicalOut = fs::weakly_canonical(fs::path(outPath), outEc);
+        fs::path canonicalTemp = fs::weakly_canonical(fs::temp_directory_path(), tempEc);
+        std::wstring outName = canonicalOut.filename().wstring();
+        if (outEc || tempEc || !iequalsW(canonicalOut.parent_path().wstring(), canonicalTemp.wstring())
+                || outName.rfind(L"easyinject-defender-out-", 0) != 0
+                || canonicalOut.extension() != L".txt") {
+            return 2;
+        }
+        std::error_code expectedEc;
+        std::error_code actualEc;
+        fs::path expected = fs::weakly_canonical(getPreferredPersistentDllDir(), expectedEc);
+        fs::path actual = fs::weakly_canonical(fs::path(target), actualEc);
+        if (expectedEc || actualEc || !iequalsW(expected.wstring(), actual.wstring())) {
+            writeTextFile(canonicalOut, "FAIL: requested path is not the configured persistent DLL directory");
+            return 2;
+        }
+        if (isExclusionPresent(actual.wstring())) {
+            writeTextFile(canonicalOut, "OK: exclusion already present");
+            return 0;
+        }
+
+        std::wstring literal = quotePowerShellLiteral(actual.wstring());
+        std::wstring command = L"$ErrorActionPreference='Stop';$p='" + literal
+            + L"';Add-MpPreference -ExclusionPath $p;"
+              L"$ok=$false;for($i=0;$i -lt 20;$i++){foreach($e in (Get-MpPreference).ExclusionPath){"
+              L"if([IO.Path]::GetFullPath($e).TrimEnd('\\') -ieq [IO.Path]::GetFullPath($p).TrimEnd('\\')){$ok=$true;break}};"
+              L"if($ok){break};Start-Sleep -Milliseconds 250};if(-not $ok){throw 'exclusion was not reported after Add-MpPreference'}";
+        std::wstring cmd = L"\"" + getPowerShellExePath()
+            + L"\" -NoProfile -NonInteractive -Command \"" + command + L"\"";
+        auto result = execCommandCapture(cmd);
+        if (result.exitCode != 0) {
+            writeTextFile(canonicalOut, result.output.empty() ? "FAIL: Add-MpPreference failed" : "FAIL: " + result.output);
+            return 1;
+        }
+        if (!isExclusionPresent(actual.wstring())) {
+            writeTextFile(canonicalOut, "FAIL: exclusion verification failed");
+            return 1;
+        }
+        writeTextFile(canonicalOut, "OK");
+        return 0;
+    } catch (const std::exception& error) {
+        (void)error;
+        return 1;
+    }
+}
+
+struct ExclusionResult {
+    bool success;
+    std::string details;
+};
+
+static ExclusionResult ensureExclusionWithSingleUac(const fs::path& dir) {
+    if (dir.empty()) return {false, "No directory provided"};
+    fs::path outFile = fs::temp_directory_path()
+        / (L"easyinject-defender-out-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()) + L".txt");
+    std::error_code removeEc;
+    fs::remove(outFile, removeEc);
+
+    std::wstring params = std::wstring(DEFENDER_ELEVATED_ENSURE_ARG) + L" \"" + dir.wstring()
+        + L"\" " + DEFENDER_ELEVATED_OUT_ARG + L" \"" + outFile.wstring() + L"\"";
+    auto elevated = execElevatedAndWait(getExePath().wstring(), params, 120000);
+    std::string details = trim(readTextFile(outFile));
+    fs::remove(outFile, removeEc);
+    if (elevated.exitCode == 0) return {true, details};
+    if (details.empty()) details = elevated.output.empty() ? "Elevated helper failed" : elevated.output;
+    return {false, details};
+}
+
+#endif
 
 } // namespace Defender
 
@@ -2241,8 +2353,26 @@ struct Asset {
     long long size = -1;
 };
 
-static Asset chooseAsset(const std::vector<std::string>& assetJsons, const std::string& assetRegex,
-                          const std::string& currentExeName) {
+static bool isAllowedVariantUpdateAsset(const std::string& name) {
+#if defined(EASYINJECT_REDUCED_AV_HEURISTICS)
+    const std::string suffix = "-reduced-av-heuristics.exe";
+    return name.size() >= suffix.size() && iequals(name.substr(name.size() - suffix.size()), suffix);
+#else
+    return true;
+#endif
+}
+
+static Asset chooseAsset(const std::vector<std::string>& assetJsons, const std::string& canonicalAssetName,
+                          const std::string& assetRegex, const std::string& currentExeName) {
+    // Exact variant identity must win over broad patterns and release ordering.
+    if (!canonicalAssetName.empty()) {
+        for (const auto& assetJson : assetJsons) {
+            std::string name = Json::getString(assetJson, "name");
+            if (iequals(name, canonicalAssetName))
+                return {name, Json::getString(assetJson, "browser_download_url"), Json::getNumber(assetJson, "size")};
+        }
+    }
+
     // Build regex - default to .exe if not specified
     std::string regexStr = trim(assetRegex);
     // If the branding still has .jar regex, switch to .exe for the native port
@@ -2261,7 +2391,7 @@ static Asset chooseAsset(const std::vector<std::string>& assetJsons, const std::
         for (auto& aj : assetJsons) {
             std::string name = Json::getString(aj, "name");
             if (name.empty()) continue;
-            if (std::regex_match(name, pat)) {
+            if (isAllowedVariantUpdateAsset(name) && std::regex_match(name, pat)) {
                 return {name, Json::getString(aj, "browser_download_url"), Json::getNumber(aj, "size")};
             }
         }
@@ -2271,7 +2401,7 @@ static Asset chooseAsset(const std::vector<std::string>& assetJsons, const std::
     if (!currentExeName.empty()) {
         for (auto& aj : assetJsons) {
             std::string name = Json::getString(aj, "name");
-            if (iequals(name, currentExeName))
+            if (isAllowedVariantUpdateAsset(name) && iequals(name, currentExeName))
                 return {name, Json::getString(aj, "browser_download_url"), Json::getNumber(aj, "size")};
         }
     }
@@ -2279,7 +2409,7 @@ static Asset chooseAsset(const std::vector<std::string>& assetJsons, const std::
     // Third pass: any .exe
     for (auto& aj : assetJsons) {
         std::string name = Json::getString(aj, "name");
-        if (name.size() > 4 && iequals(name.substr(name.size() - 4), ".exe"))
+        if (isAllowedVariantUpdateAsset(name) && name.size() > 4 && iequals(name.substr(name.size() - 4), ".exe"))
             return {name, Json::getString(aj, "browser_download_url"), Json::getNumber(aj, "size")};
     }
 
@@ -2417,7 +2547,12 @@ static bool maybeUpdateAndRescheduleWatcher(const fs::path& workingDir) {
 
     auto assets = Json::getAssetsArray(resp.body);
     std::string stableExeName = toUtf8(getStableExeFileName());
-    Asset asset = chooseAsset(assets, g_assetNameRegex, stableExeName);
+    std::string canonicalAssetName = g_projectName + "-" + remoteVer + "-double-click-me"
+#if defined(EASYINJECT_REDUCED_AV_HEURISTICS)
+        + "-reduced-av-heuristics"
+#endif
+        + ".exe";
+    Asset asset = chooseAsset(assets, canonicalAssetName, g_assetNameRegex, stableExeName);
     if (asset.downloadUrl.empty()) {
         logMsg("[Updater] No matching .exe asset found");
         Ui::showDialog(
@@ -2707,10 +2842,21 @@ static void saveLauncherPaths() {
 }
 
 static void killLaunchers() {
+#if defined(EASYINJECT_REDUCED_AV_HEURISTICS)
+    auto launchers = ProcessUtils::findProcessesByImageNames({L"prismlauncher.exe", L"multimc.exe"});
+    for (const auto& launcher : launchers) {
+        HANDLE process = OpenProcess(PROCESS_TERMINATE, FALSE, launcher.processId);
+        if (process) {
+            TerminateProcess(process, 1);
+            CloseHandle(process);
+        }
+    }
+#else
     for (auto& name : {L"prismlauncher.exe", L"multimc.exe"}) {
         std::wstring cmd = L"cmd /C taskkill /F /IM \"" + std::wstring(name) + L"\"";
         execCommandCapture(cmd);
     }
+#endif
 }
 
 static void restartLaunchers() {
@@ -3251,6 +3397,35 @@ static int runInstallMode() {
     }
 
     // Check Defender exclusion
+#if defined(EASYINJECT_REDUCED_AV_HEURISTICS)
+    bool folderExcluded = Defender::isExclusionPresent(persistentDllDir.wstring());
+    if (!folderExcluded) {
+        int consent = Ui::showDialog(
+            toWide(g_projectName + " v" + g_version + " — Defender Exclusion"),
+            toWide("Windows Defender may quarantine the injected DLLs.\n\n"
+                   "With your approval, this installer will add only this DLL directory as an exclusion:\n"
+                   + persistentDllDir.string() + "\n\n"
+                   "A UAC prompt may appear. Choose Continue to add it, Skip to continue without it, or Exit."),
+            Ui::DialogTone::Question,
+            {{IDYES, L"Continue", true}, {IDNO, L"Skip"}, {IDCANCEL, L"Exit"}},
+            IDCANCEL, true, L"Windows Defender Exclusion Needed", 820);
+        if (consent == IDCANCEL) return 1;
+        if (consent == IDYES) {
+            auto result = Defender::ensureExclusionWithSingleUac(persistentDllDir);
+            if (!result.success) {
+                int proceed = Ui::showDialog(
+                    toWide(g_projectName + " — Defender Exclusion Failed"),
+                    toWide("Could not add or verify the Defender exclusion.\n\n"
+                           "You can add this folder manually in Windows Security:\n" + persistentDllDir.string()
+                           + "\n\nDetails: " + result.details + "\n\nContinue installation without it?"),
+                    Ui::DialogTone::Warning,
+                    {{IDYES, L"Continue anyway", true}, {IDCANCEL, L"Exit"}},
+                    IDCANCEL, true, L"Manual Action Required", 860);
+                if (proceed != IDYES) return 1;
+            }
+        }
+    }
+#else
     bool folderExcluded = Defender::isExclusionPresent(persistentDllDir.wstring());
     bool exeExcluded = Defender::isExclusionPresent(stableExe.wstring());
 
@@ -3306,6 +3481,7 @@ static int runInstallMode() {
             }
         }
     }
+#endif
 
     // Determine subfolder prefix if exe is in minecraft/.minecraft
     std::string subfolderPrefix;
@@ -3393,10 +3569,16 @@ static int runInstallMode() {
 // ============================================================================
 static int runDefenderElevatedEnsureMode(int argc, wchar_t* argv[]) {
     std::wstring target = getArgValue(argc, argv, DEFENDER_ELEVATED_ENSURE_ARG);
+#if !defined(EASYINJECT_REDUCED_AV_HEURISTICS)
     std::wstring selfExe = getArgValue(argc, argv, DEFENDER_ELEVATED_SELFEXE_ARG);
+#endif
     std::wstring outPath = getArgValue(argc, argv, DEFENDER_ELEVATED_OUT_ARG);
     if (target.empty() || outPath.empty()) return 2;
+#if defined(EASYINJECT_REDUCED_AV_HEURISTICS)
+    return Defender::runElevatedEnsureMode(target, outPath);
+#else
     return Defender::runElevatedEnsureMode(target, selfExe, outPath);
+#endif
 }
 
 // ============================================================================

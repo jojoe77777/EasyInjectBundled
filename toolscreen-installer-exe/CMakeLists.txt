@@ -31,6 +31,7 @@ endmacro()
 
 read_branding_property("update.latestReleaseApiUrl" INSTALLER_API_URL "https://api.github.com/repos/jojoe77777/Toolscreen/releases/latest")
 read_branding_property("update.releasesUrl" INSTALLER_RELEASES_URL "https://github.com/jojoe77777/Toolscreen/releases")
+read_branding_property("brand.name" INSTALLER_BRAND_NAME "Toolscreen")
 
 file(TO_CMAKE_PATH "${APP_ICON_FILE}" APP_ICON_FILE_RC)
 
@@ -72,3 +73,7 @@ target_link_libraries(ToolscreenDownloaderExe PRIVATE
     User32
     Winhttp
 )
+
+if(MSVC)
+    target_link_options(ToolscreenDownloaderExe PRIVATE /Brepro)
+endif()

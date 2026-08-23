@@ -52,9 +52,9 @@ public class DllInjector {
         }
         long dllSize = dllPath.toFile().length();
 
-        // Open target process with all access
+        // Open the target process with the access policy compiled for this artifact.
         HANDLE hProcess = kernel32.OpenProcess(
-            WindowsNative.PROCESS_ALL_ACCESS,
+            InjectionAccessPolicy.requiredProcessAccess(),
             false,
             processId
         );

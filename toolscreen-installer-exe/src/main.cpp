@@ -533,12 +533,12 @@ static bool downloadToFile(
 
 } // namespace Http
 
-static Asset chooseAsset(const std::vector<std::string>& assets, const std::string& targetName) {
+static Asset chooseAsset(const std::vector<std::string>& assets, const std::string& canonicalName, const std::string& targetName) {
     std::regex exeRegex(kDefaultExeRegex, std::regex::icase);
 
     for (const std::string& assetJson : assets) {
         std::string name = Json::getString(assetJson, "name");
-        if (!name.empty() && std::regex_match(name, exeRegex)) {
+        if (!name.empty() && _stricmp(name.c_str(), canonicalName.c_str()) == 0) {
             return {name, Json::getString(assetJson, "browser_download_url")};
         }
     }
@@ -546,6 +546,13 @@ static Asset chooseAsset(const std::vector<std::string>& assets, const std::stri
     for (const std::string& assetJson : assets) {
         std::string name = Json::getString(assetJson, "name");
         if (!name.empty() && _stricmp(name.c_str(), targetName.c_str()) == 0) {
+            return {name, Json::getString(assetJson, "browser_download_url")};
+        }
+    }
+
+    for (const std::string& assetJson : assets) {
+        std::string name = Json::getString(assetJson, "name");
+        if (!name.empty() && std::regex_match(name, exeRegex)) {
             return {name, Json::getString(assetJson, "browser_download_url")};
         }
     }
@@ -621,7 +628,10 @@ static DWORD WINAPI downloadWorkerProc(LPVOID parameter) {
 
     std::string tagName = Json::getString(response.body, "tag_name");
     std::vector<std::string> assets = Json::getAssetsArray(response.body);
-    Asset asset = chooseAsset(assets, "Toolscreen.exe");
+    std::string releaseVersion = tagName;
+    if (!releaseVersion.empty() && (releaseVersion[0] == 'v' || releaseVersion[0] == 'V')) releaseVersion.erase(0, 1);
+    std::string canonicalName = std::string(TOOLSCREEN_INSTALLER_BRAND_NAME) + "-" + releaseVersion + "-double-click-me.exe";
+    Asset asset = chooseAsset(assets, canonicalName, "Toolscreen.exe");
     if (asset.name.empty() || asset.downloadUrl.empty()) {
         postCompletion(context->hwnd, false, L"The latest GitHub release did not contain a downloadable Toolscreen EXE asset.");
         return 1;

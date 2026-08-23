@@ -1,0 +1,196 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.easyinject</groupId>
+    <artifactId>jar_reduced_av_heuristics</artifactId>
+    <version>1.0</version>
+    <packaging>jar</packaging>
+
+    <properties>
+        <maven.compiler.source>1.8</maven.compiler.source>
+        <maven.compiler.target>1.8</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <project.build.outputTimestamp>2026-08-23T00:00:00Z</project.build.outputTimestamp>
+        <root.dir>${project.basedir}/..</root.dir>
+    </properties>
+
+    <repositories>
+        <repository><id>fabricmc</id><url>https://maven.fabricmc.net/</url></repository>
+    </repositories>
+
+    <dependencies>
+        <dependency>
+            <groupId>net.fabricmc</groupId>
+            <artifactId>fabric-loader</artifactId>
+            <version>0.14.25</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>net.java.dev.jna</groupId>
+            <artifactId>jna</artifactId>
+            <version>5.14.0</version>
+        </dependency>
+        <dependency>
+            <groupId>net.java.dev.jna</groupId>
+            <artifactId>jna-platform</artifactId>
+            <version>5.14.0</version>
+        </dependency>
+        <dependency>
+            <groupId>com.google.code.gson</groupId>
+            <artifactId>gson</artifactId>
+            <version>2.11.0</version>
+        </dependency>
+        <dependency>
+            <groupId>org.xerial</groupId>
+            <artifactId>sqlite-jdbc</artifactId>
+            <version>3.45.3.0</version>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId><version>5.10.2</version><scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <sourceDirectory>${project.build.directory}/generated-sources/java</sourceDirectory>
+        <testSourceDirectory>${project.build.directory}/generated-test-sources/java</testSourceDirectory>
+        <resources>
+            <resource>
+                <directory>${root.dir}</directory>
+                <includes><include>branding.properties</include></includes>
+                <filtering>false</filtering>
+            </resource>
+            <resource>
+                <directory>${root.dir}/custom-dlls</directory>
+                <targetPath>dlls</targetPath>
+                <includes>
+                    <include>*.dll</include>
+                    <include>*.json</include>
+                </includes>
+            </resource>
+            <resource>
+                <directory>${root.dir}/src/main/resources</directory>
+            </resource>
+        </resources>
+
+        <plugins>
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>properties-maven-plugin</artifactId>
+                <version>1.2.1</version>
+                <executions>
+                    <execution>
+                        <phase>initialize</phase>
+                        <goals><goal>read-project-properties</goal></goals>
+                        <configuration>
+                            <files><file>${root.dir}/branding.properties</file></files>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-antrun-plugin</artifactId>
+                <version>3.1.0</version>
+                <executions>
+                    <execution>
+                        <id>generate-reduced-policy-sources</id>
+                        <phase>generate-sources</phase>
+                        <goals><goal>run</goal></goals>
+                        <configuration>
+                            <target>
+                                <copy todir="${project.build.directory}/generated-sources/java">
+                                    <fileset dir="${root.dir}/src/main/java" includes="**/*.java" />
+                                </copy>
+                                <copy todir="${project.build.directory}/generated-test-sources/java">
+                                    <fileset dir="${root.dir}/src/test/java" includes="**/*.java" />
+                                </copy>
+                                <replaceregexp match="[ \t]*// &lt;compatibility-policy&gt;.*?// &lt;/compatibility-policy&gt;[ \t]*" replace="" flags="gs">
+                                    <fileset dir="${project.build.directory}/generated-sources/java" includes="**/*.java" />
+                                    <fileset dir="${project.build.directory}/generated-test-sources/java" includes="**/*.java" />
+                                </replaceregexp>
+                                <replaceregexp match="^[ \t]*// &lt;/?reduced-policy&gt;[ \t]*\r?\n?" replace="" flags="gm">
+                                    <fileset dir="${project.build.directory}/generated-sources/java" includes="**/*.java" />
+                                    <fileset dir="${project.build.directory}/generated-test-sources/java" includes="**/*.java" />
+                                </replaceregexp>
+                                <replaceregexp match="^([ \t]*)//\|" replace="\1" flags="gm">
+                                    <fileset dir="${project.build.directory}/generated-sources/java" includes="**/*.java" />
+                                    <fileset dir="${project.build.directory}/generated-test-sources/java" includes="**/*.java" />
+                                </replaceregexp>
+                            </target>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.5.1</version>
+                <executions>
+                    <execution>
+                        <id>shade-reduced-launcher</id>
+                        <phase>package</phase>
+                        <goals><goal>shade</goal></goals>
+                        <configuration>
+                            <finalName>${brand.name}-${brand.version}-double-click-me-reduced-av-heuristics</finalName>
+                            <filters>
+                                <filter>
+                                    <artifact>${project.groupId}:${project.artifactId}</artifact>
+                                    <excludes><exclude>net/fabricmc/api/**</exclude></excludes>
+                                </filter>
+                                <filter>
+                                    <artifact>org.xerial:sqlite-jdbc</artifact>
+                                    <excludes>
+                                        <exclude>org/sqlite/native/Linux-Android/**</exclude>
+                                        <exclude>org/sqlite/native/Linux-Musl/**</exclude>
+                                        <exclude>org/sqlite/native/FreeBSD/**</exclude>
+                                        <exclude>org/sqlite/native/Linux/**</exclude>
+                                        <exclude>org/sqlite/native/Mac/**</exclude>
+                                        <exclude>org/sqlite/native/Windows/aarch64/**</exclude>
+                                        <exclude>org/sqlite/native/Windows/armv7/**</exclude>
+                                        <exclude>org/sqlite/native/Windows/x86/**</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
+                            <transformers>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                                    <mainClass>com.easyinject.Main</mainClass>
+                                    <manifestEntries>
+                                        <EasyInject-Build-Variant>reduced-av-heuristics</EasyInject-Build-Variant>
+                                    </manifestEntries>
+                                </transformer>
+                            </transformers>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-resources-plugin</artifactId>
+                <version>3.3.1</version>
+                <executions>
+                    <execution>
+                        <id>copy-reduced-installer</id>
+                        <phase>package</phase>
+                        <goals><goal>copy-resources</goal></goals>
+                        <configuration>
+                            <outputDirectory>${root.dir}/target</outputDirectory>
+                            <resources>
+                                <resource>
+                                    <directory>${project.build.directory}</directory>
+                                    <filtering>false</filtering>
+                                    <includes><include>${brand.name}-${brand.version}-double-click-me-reduced-av-heuristics.jar</include></includes>
+                                </resource>
+                            </resources>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

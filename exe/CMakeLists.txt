@@ -32,6 +32,16 @@ if(NOT EXISTS "${APP_ICON_FILE}")
 endif()
 
 file(STRINGS "${BRANDING_FILE}" BRAND_VERSION_LINE REGEX "^[ \t]*brand\\.version[ \t]*=" LIMIT_COUNT 1)
+file(STRINGS "${BRANDING_FILE}" BRAND_NAME_LINE REGEX "^[ \t]*brand\\.name[ \t]*=" LIMIT_COUNT 1)
+if(BRAND_NAME_LINE STREQUAL "")
+    message(FATAL_ERROR "brand.name not found in ${BRANDING_FILE}")
+endif()
+string(REGEX REPLACE "^[ \t]*brand\\.name[ \t]*=[ \t]*" "" BRAND_NAME "${BRAND_NAME_LINE}")
+string(STRIP "${BRAND_NAME}" BRAND_NAME)
+if(BRAND_NAME STREQUAL "")
+    message(FATAL_ERROR "brand.name is empty in ${BRANDING_FILE}")
+endif()
+
 if(BRAND_VERSION_LINE STREQUAL "")
     message(FATAL_ERROR "brand.version not found in ${BRANDING_FILE}")
 endif()
@@ -89,31 +99,35 @@ configure_file(
     @ONLY
 )
 
-add_executable(EasyInjectExe WIN32
-    src/main.cpp
-    "${CMAKE_CURRENT_BINARY_DIR}/embedded_resources.rc"
-)
+function(configure_installer_target target output_name)
+    add_executable(${target} WIN32
+        src/main.cpp
+        "${CMAKE_CURRENT_BINARY_DIR}/embedded_resources.rc"
+    )
+    set_target_properties(${target} PROPERTIES OUTPUT_NAME "${output_name}")
+    target_compile_definitions(${target} PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX ${ARGN})
+    if(MSVC)
+        target_link_options(${target} PRIVATE /Brepro)
+    endif()
+    target_link_libraries(${target} PRIVATE
+        Advapi32 Bcrypt Kernel32 Ntdll Psapi Shell32 Shlwapi User32 Winhttp Comctl32
+    )
+endfunction()
 
-set_target_properties(EasyInjectExe PROPERTIES
-    OUTPUT_NAME "Toolscreen-${BRAND_VERSION}-double-click-me"
-)
+# Existing compatibility target and filename remain unchanged.
+configure_installer_target(EasyInjectExe "${BRAND_NAME}-${BRAND_VERSION}-double-click-me")
 
-target_compile_definitions(EasyInjectExe PRIVATE
-    UNICODE
-    _UNICODE
-    WIN32_LEAN_AND_MEAN
-    NOMINMAX
-)
+# Compile-time policy target: compatibility-only code and strings are not linked.
+configure_installer_target(installer_exe_reduced_av_heuristics
+    "${BRAND_NAME}-${BRAND_VERSION}-double-click-me-reduced-av-heuristics"
+    EASYINJECT_REDUCED_AV_HEURISTICS=1)
 
-target_link_libraries(EasyInjectExe PRIVATE
-    Advapi32
-    Bcrypt
-    Kernel32
-    Ntdll
-    Psapi
-    Shell32
-    Shlwapi
-    User32
-    Winhttp
-    Comctl32
-)
+include(CTest)
+if(BUILD_TESTING)
+    add_test(NAME reduced_av_heuristics_artifact_inspection
+        COMMAND powershell -NoProfile -ExecutionPolicy RemoteSigned -File
+            "${CMAKE_CURRENT_SOURCE_DIR}/../tests/verify-packaging.ps1"
+            -RepositoryRoot "${CMAKE_CURRENT_SOURCE_DIR}/.."
+            -ReducedExe "$<TARGET_FILE:installer_exe_reduced_av_heuristics>"
+            -CompatibilityExe "$<TARGET_FILE:EasyInjectExe>")
+endif()

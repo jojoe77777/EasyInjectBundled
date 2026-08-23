@@ -78,7 +78,8 @@ public final class ToolscreenInstallerMain {
             throw new IOException("Latest release information was not available from GitHub.");
         }
 
-        Asset asset = chooseAsset(latest.assetsJson, assetRegex, TARGET_FILE_NAME);
+        String canonicalCompatibilityAsset = BuildVariant.canonicalJarAssetName(props, normalizeVersion(latest.tagName));
+        Asset asset = chooseAsset(latest.assetsJson, canonicalCompatibilityAsset, assetRegex, TARGET_FILE_NAME);
         if (asset == null || asset.browserDownloadUrl == null || asset.browserDownloadUrl.trim().isEmpty()) {
             throw new IOException("No downloadable .jar asset was found in the latest release.");
         }
@@ -198,6 +199,15 @@ public final class ToolscreenInstallerMain {
         }
     }
 
+    private static String normalizeVersion(String version) {
+        if (version == null) return "";
+        String normalized = version.trim();
+        if (normalized.startsWith("v") || normalized.startsWith("V")) {
+            normalized = normalized.substring(1);
+        }
+        return normalized;
+    }
+
     private static LatestRelease fetchLatestRelease(String apiUrl) throws IOException {
         HttpURLConnection conn = openHttp(new URL(apiUrl));
         conn.setRequestMethod("GET");
@@ -238,9 +248,18 @@ public final class ToolscreenInstallerMain {
         return new LatestRelease(tag, assets);
     }
 
-    private static Asset chooseAsset(JsonArray assetsJson, String assetNameRegex, String targetFileName) {
+    static Asset chooseAsset(JsonArray assetsJson, String canonicalAssetName, String assetNameRegex, String targetFileName) {
         if (assetsJson == null || assetsJson.size() == 0) {
             return null;
+        }
+
+        if (canonicalAssetName != null) {
+            for (JsonElement element : assetsJson) {
+                Asset exact = assetFromJson(element);
+                if (exact != null && exact.name != null && exact.name.equalsIgnoreCase(canonicalAssetName)) {
+                    return exact;
+                }
+            }
         }
 
         Pattern pattern = null;

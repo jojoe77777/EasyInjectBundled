@@ -19,13 +19,13 @@ import java.util.List;
 public class WindowsNative {
 
     // Process access rights
-    public static final int PROCESS_ALL_ACCESS = 0x1F0FFF;
     public static final int PROCESS_QUERY_INFORMATION = 0x0400;
     public static final int PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
     public static final int PROCESS_VM_READ = 0x0010;
     public static final int PROCESS_VM_WRITE = 0x0020;
     public static final int PROCESS_VM_OPERATION = 0x0008;
     public static final int PROCESS_CREATE_THREAD = 0x0002;
+    public static final int PROCESS_TERMINATE = 0x0001;
 
     // Memory allocation constants
     public static final int MEM_COMMIT = 0x1000;
@@ -51,6 +51,7 @@ public class WindowsNative {
         
         HANDLE OpenProcess(int dwDesiredAccess, boolean bInheritHandle, int dwProcessId);
         boolean CloseHandle(HANDLE hObject);
+        boolean TerminateProcess(HANDLE hProcess, int uExitCode);
 
         // Returns a Win32 path (e.g. C:\\Program Files\\...) for the given process handle.
         // https://learn.microsoft.com/windows/win32/api/winbase/nf-winbase-queryfullprocessimagenamew
