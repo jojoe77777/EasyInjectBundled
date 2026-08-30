@@ -74,7 +74,19 @@ static const wchar_t* DEFENDER_ELEVATED_ENSURE_ARG   = L"--defender-elevated-ens
 static const wchar_t* DEFENDER_ELEVATED_SELFEXE_ARG  = L"--defender-elevated-selfexe";
 #endif
 static const wchar_t* DEFENDER_ELEVATED_OUT_ARG      = L"--defender-elevated-out";
-static const wchar_t* LOGGER_DLL_NAME   = L"liblogger_x64.dll";
+
+static std::wstring detectNativePayloadArchitecture() {
+#if defined(_M_ARM64)
+    return L"arm64";
+#else
+    // The injected DLL must match this injector process. In particular, an
+    // x64 build running under emulation on ARM64 Windows still needs x64 DLLs.
+    return L"x64";
+#endif
+}
+
+static const std::wstring PAYLOAD_ARCH = detectNativePayloadArchitecture();
+static const std::wstring LOGGER_DLL_NAME = L"liblogger_" + PAYLOAD_ARCH + L".dll";
 static const wchar_t* LOG_FILE_NAME     = L"injector.log";
 static const int BRANDING_RESOURCE_ID = 101;
 static const int DLL_INDEX_RESOURCE_ID = 102;
@@ -2625,14 +2637,33 @@ static std::vector<fs::path> copyDllsToPersistentDir() {
     fs::create_directories(destDir);
 
     auto bundled = getEmbeddedDllEntries();
+    const std::string payloadArch = toUtf8(PAYLOAD_ARCH);
+    const bool hasMatchingArchitectureSpecificToolscreen = std::any_of(
+        bundled.begin(), bundled.end(), [&payloadArch](const EmbeddedDllEntry& entry) {
+            return toLower(entry.fileName) == "toolscreen_" + payloadArch + ".dll";
+        });
     for (auto& entry : bundled) {
+        const std::string lowerName = toLower(entry.fileName);
+        if (hasMatchingArchitectureSpecificToolscreen && lowerName == "toolscreen.dll") {
+            continue;
+        }
+        const bool x64Payload = lowerName == "liblogger_x64.dll" || lowerName == "toolscreen_x64.dll";
+        const bool arm64Payload = lowerName == "liblogger_arm64.dll" || lowerName == "toolscreen_arm64.dll";
+        if ((x64Payload && payloadArch != "x64") || (arm64Payload && payloadArch != "arm64")) {
+            continue;
+        }
+
         std::vector<uint8_t> data;
         if (!loadEmbeddedResourceBytes(entry.resourceId, data)) {
             logMsg("[DLL] Missing embedded resource for " + entry.fileName);
             continue;
         }
 
-        fs::path dest = destDir / toWide(entry.fileName);
+        const std::string installedName =
+            (lowerName == "toolscreen_x64.dll" || lowerName == "toolscreen_arm64.dll")
+                ? "Toolscreen.dll"
+                : entry.fileName;
+        fs::path dest = destDir / toWide(installedName);
         try {
             std::ofstream out(dest, std::ios::binary | std::ios::trunc);
             if (!out.is_open()) throw std::runtime_error("Unable to open destination file");

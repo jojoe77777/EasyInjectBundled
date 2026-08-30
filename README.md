@@ -8,7 +8,9 @@ EasyInjectBundled packages configured DLLs into complete Java and native Windows
 - CMake 3.20 or newer, Visual Studio 2022 with the C++ workload, and a Windows SDK for EXEs.
 - PowerShell for packaging inspection tests.
 
-Configure `brand.name`, `brand.version`, and update URLs in `branding.properties`. Put custom DLL and Vulkan support files in `custom-dlls`; `liblogger_x64.dll` is always included from `src/main/resources/dlls`.
+Configure `brand.name`, `brand.version`, and update URLs in `branding.properties`. Universal installers require `liblogger_x64.dll` and `liblogger_arm64.dll` in `src/main/resources/dlls`, plus `Toolscreen_x64.dll` and `Toolscreen_arm64.dll` in `custom-dlls`. Other custom DLL and Vulkan support files also belong in `custom-dlls`.
+
+Both architectures are packaged into each installer. At runtime EasyInject extracts only the payload matching the native injector or JVM architecture, installs the selected Toolscreen payload as `Toolscreen.dll`, and uses its matching `liblogger_<arch>.dll`. Both Windows x86-64 and ARM64 SQLite JNI libraries remain in the JARs for the same reason.
 
 Run the normal full build from a Developer PowerShell or Command Prompt:
 
@@ -22,6 +24,8 @@ The equivalent individual commands are:
 mvn clean package
 cmake -S exe -B exe/build -A x64
 cmake --build exe/build --config Release --parallel
+cmake -S exe -B exe/build-arm64 -A ARM64
+cmake --build exe/build-arm64 --config Release --parallel
 cmake -S toolscreen-installer-exe -B toolscreen-installer-exe/build -A x64
 cmake --build toolscreen-installer-exe/build --config Release --parallel
 ctest --test-dir exe/build -C Release --output-on-failure
@@ -39,6 +43,8 @@ For brand `Toolscreen` and version `1.5.0`, a full build produces:
 - `target/EasyInjectBundled-1.0.jar` and `target/EasyInjectBundled-1.0-toolscreen-downloader.jar` (existing Maven-coordinate outputs)
 - `exe/build/Release/Toolscreen-1.5.0-double-click-me.exe` (existing compatibility EXE)
 - `exe/build/Release/Toolscreen-1.5.0-double-click-me-reduced-av-heuristics.exe`
+- `exe/build-arm64/Release/Toolscreen-1.5.0-double-click-me.exe` (ARM64 compatibility EXE)
+- `exe/build-arm64/Release/Toolscreen-1.5.0-double-click-me-reduced-av-heuristics.exe`
 - `toolscreen-installer-exe/build/Release/toolscreen-downloader.exe` (existing compatibility downloader)
 
 The compatibility filenames, Maven package behavior, `EasyInjectExe` target, stable installed names (`<brand>.jar` and `<brand>.exe`), configuration locations, file formats, and runtime policy are unchanged.

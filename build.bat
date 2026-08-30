@@ -34,21 +34,47 @@ if not exist "custom-dlls" (
 
 REM List DLLs that will be bundled
 echo DLLs to be bundled:
-echo   - liblogger_x64.dll (built-in)
+echo   - liblogger_x64.dll (required)
+echo   - liblogger_arm64.dll (required)
+echo   - Toolscreen_x64.dll (required)
+echo   - Toolscreen_arm64.dll (required)
 for %%f in (custom-dlls\*.dll) do (
     echo   - %%~nxf
 )
 echo.
+
+for %%f in (
+    "src\main\resources\dlls\liblogger_x64.dll"
+    "src\main\resources\dlls\liblogger_arm64.dll"
+    "custom-dlls\Toolscreen_x64.dll"
+    "custom-dlls\Toolscreen_arm64.dll"
+) do (
+    if not exist "%%~f" (
+        echo ERROR: Missing universal packaging input: %%~f
+        exit /b 1
+    )
+)
+
+if exist "custom-dlls\Toolscreen.dll" (
+    echo NOTE: Ignoring obsolete custom-dlls\Toolscreen.dll; use the architecture-suffixed payloads.
+)
 
 REM Build both installer JAR variants and the existing downloader JAR.
 call mvn clean package -Dbrand.name=%BRAND_NAME% -Dbrand.version=%BRAND_VERSION%
 
 if %ERRORLEVEL% NEQ 0 goto :build_failed
 
-REM Build both native installer variants from the same source.
+REM Build both native installer policies for x64.
 call cmake -S exe -B exe\build -A x64
 if %ERRORLEVEL% NEQ 0 goto :build_failed
 call cmake --build exe\build --config Release --parallel
+if %ERRORLEVEL% NEQ 0 goto :build_failed
+
+REM Build both native installer policies for ARM64. A native injector must
+REM match the target JVM architecture, so the two EXEs remain separate.
+call cmake -S exe -B exe\build-arm64 -A ARM64
+if %ERRORLEVEL% NEQ 0 goto :build_failed
+call cmake --build exe\build-arm64 --config Release --parallel
 if %ERRORLEVEL% NEQ 0 goto :build_failed
 
 REM Preserve the existing native downloader build.
@@ -65,6 +91,8 @@ if %ERRORLEVEL% EQU 0 (
     echo Output: target\toolscreen-downloader.jar
     echo Output: exe\build\Release\%BRAND_NAME%-%BRAND_VERSION%-double-click-me.exe
     echo Output: exe\build\Release\%BRAND_NAME%-%BRAND_VERSION%-double-click-me-reduced-av-heuristics.exe
+    echo Output: exe\build-arm64\Release\%BRAND_NAME%-%BRAND_VERSION%-double-click-me.exe
+    echo Output: exe\build-arm64\Release\%BRAND_NAME%-%BRAND_VERSION%-double-click-me-reduced-av-heuristics.exe
     echo Output: toolscreen-installer-exe\build\Release\toolscreen-downloader.exe
     echo.
 ) else (

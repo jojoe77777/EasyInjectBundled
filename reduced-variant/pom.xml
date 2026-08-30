@@ -69,6 +69,7 @@
                     <include>*.dll</include>
                     <include>*.json</include>
                 </includes>
+                <excludes><exclude>Toolscreen.dll</exclude></excludes>
             </resource>
             <resource>
                 <directory>${root.dir}/src/main/resources</directory>
@@ -96,6 +97,23 @@
                 <artifactId>maven-antrun-plugin</artifactId>
                 <version>3.1.0</version>
                 <executions>
+                    <execution>
+                        <id>validate-universal-payloads</id>
+                        <phase>prepare-package</phase>
+                        <goals><goal>run</goal></goals>
+                        <configuration>
+                            <target>
+                                <fail message="Universal packaging requires both Toolscreen and liblogger architectures">
+                                    <condition><not><and>
+                                        <available file="${root.dir}/custom-dlls/Toolscreen_x64.dll" type="file" />
+                                        <available file="${root.dir}/custom-dlls/Toolscreen_arm64.dll" type="file" />
+                                        <available file="${root.dir}/src/main/resources/dlls/liblogger_x64.dll" type="file" />
+                                        <available file="${root.dir}/src/main/resources/dlls/liblogger_arm64.dll" type="file" />
+                                    </and></not></condition>
+                                </fail>
+                            </target>
+                        </configuration>
+                    </execution>
                     <execution>
                         <id>generate-reduced-policy-sources</id>
                         <phase>generate-sources</phase>
@@ -150,7 +168,6 @@
                                         <exclude>org/sqlite/native/FreeBSD/**</exclude>
                                         <exclude>org/sqlite/native/Linux/**</exclude>
                                         <exclude>org/sqlite/native/Mac/**</exclude>
-                                        <exclude>org/sqlite/native/Windows/aarch64/**</exclude>
                                         <exclude>org/sqlite/native/Windows/armv7/**</exclude>
                                         <exclude>org/sqlite/native/Windows/x86/**</exclude>
                                     </excludes>

@@ -76,10 +76,36 @@ public class Main {
     // </compatibility-policy>
     private static final String DEFENDER_ELEVATED_OUT_ARG = "--defender-elevated-out";
     private static final String DLL_RESOURCE_PATH = "dlls/";
-    private static final String LOGGER_DLL_NAME = "liblogger_x64.dll";
+    private static final String PAYLOAD_ARCH = payloadArchitectureFor(System.getProperty("os.arch", ""));
+    private static final String LOGGER_DLL_NAME = "liblogger_" + PAYLOAD_ARCH + ".dll";
     private static final String LOG_FILE = "injector.log";
     private static final int POLL_INTERVAL_MS = 100;
     private static final int TIMEOUT_SECONDS = 120;
+
+    static String payloadArchitectureFor(String architecture) {
+        String arch = architecture == null ? "" : architecture.toLowerCase(java.util.Locale.ROOT);
+        return (arch.equals("aarch64") || arch.equals("arm64")) ? "arm64" : "x64";
+    }
+
+    static boolean isPayloadForArchitecture(String fileName, String architecture) {
+        String lower = fileName.toLowerCase(java.util.Locale.ROOT);
+        String payloadArch = payloadArchitectureFor(architecture);
+        if (lower.equals("liblogger_x64.dll") || lower.equals("toolscreen_x64.dll")) {
+            return payloadArch.equals("x64");
+        }
+        if (lower.equals("liblogger_arm64.dll") || lower.equals("toolscreen_arm64.dll")) {
+            return payloadArch.equals("arm64");
+        }
+        return true;
+    }
+
+    static String installedPayloadName(String packagedName) {
+        String lower = packagedName.toLowerCase(java.util.Locale.ROOT);
+        if (lower.equals("toolscreen_x64.dll") || lower.equals("toolscreen_arm64.dll")) {
+            return "Toolscreen.dll";
+        }
+        return packagedName;
+    }
     
     private static PrintWriter logWriter = null;
     private static SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS");
@@ -4966,6 +4992,8 @@ public class Main {
 
             JarFile jar = new JarFile(jarFile);
             try {
+                boolean hasMatchingArchitectureSpecificToolscreen =
+                    jar.getJarEntry(DLL_RESOURCE_PATH + "Toolscreen_" + PAYLOAD_ARCH + ".dll") != null;
                 Enumeration<JarEntry> entries = jar.entries();
                 while (entries.hasMoreElements()) {
                     JarEntry entry = entries.nextElement();
@@ -4978,8 +5006,16 @@ public class Main {
                         if (dllName.isEmpty() || dllName.contains("/")) {
                             continue; // Skip directories or nested files
                         }
+
+                        if (hasMatchingArchitectureSpecificToolscreen && dllName.equalsIgnoreCase("Toolscreen.dll")) {
+                            continue; // Ignore stale payloads from architecture-specific packaging inputs.
+                        }
+
+                        if (!isPayloadForArchitecture(dllName, PAYLOAD_ARCH)) {
+                            continue;
+                        }
                         
-                        File outFile = new File(dllDir, dllName);
+                        File outFile = new File(dllDir, installedPayloadName(dllName));
                         InputStream in = jar.getInputStream(entry);
                         try {
                             OutputStream out = new FileOutputStream(outFile);
@@ -4996,7 +5032,7 @@ public class Main {
                             in.close();
                         }
                         
-                        System.out.println("[" + PROJECT_NAME + "] Extracted: " + dllName);
+                        System.out.println("[" + PROJECT_NAME + "] Extracted: " + outFile.getName());
                         if (dllName.toLowerCase().endsWith(".dll")) {
                             extractedDlls.add(outFile.toPath());
                         }
@@ -5050,13 +5086,13 @@ public class Main {
         List<Path> extractedDlls = new ArrayList<Path>();
         
         // Try to get DLLs from classpath
-        String[] knownDlls = { LOGGER_DLL_NAME };
+        String[] knownDlls = { LOGGER_DLL_NAME, "Toolscreen_" + PAYLOAD_ARCH + ".dll" };
         
         for (String dllName : knownDlls) {
             InputStream in = Main.class.getResourceAsStream("/" + DLL_RESOURCE_PATH + dllName);
             if (in != null) {
                 try {
-                    File outFile = new File(dllDir, dllName);
+                    File outFile = new File(dllDir, installedPayloadName(dllName));
                     OutputStream out = new FileOutputStream(outFile);
                     try {
                         byte[] buffer = new byte[8192];
@@ -5069,7 +5105,7 @@ public class Main {
                     }
                     in.close();
                     extractedDlls.add(outFile.toPath());
-                    System.out.println("[" + PROJECT_NAME + "] Extracted from classpath: " + dllName);
+                    System.out.println("[" + PROJECT_NAME + "] Extracted from classpath: " + outFile.getName());
                 } catch (IOException e) {
                     System.err.println("[" + PROJECT_NAME + "] Error extracting " + dllName + ": " + e.getMessage());
                 }

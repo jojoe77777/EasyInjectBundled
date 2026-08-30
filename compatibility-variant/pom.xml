@@ -34,7 +34,7 @@
         <testSourceDirectory>${root.dir}/src/test/java</testSourceDirectory>
         <resources>
             <resource><directory>${root.dir}</directory><includes><include>branding.properties</include></includes><filtering>false</filtering></resource>
-            <resource><directory>${root.dir}/custom-dlls</directory><targetPath>dlls</targetPath><includes><include>*.dll</include><include>*.json</include></includes></resource>
+            <resource><directory>${root.dir}/custom-dlls</directory><targetPath>dlls</targetPath><includes><include>*.dll</include><include>*.json</include></includes><excludes><exclude>Toolscreen.dll</exclude></excludes></resource>
             <resource><directory>${root.dir}/src/main/resources</directory></resource>
         </resources>
         <plugins>
@@ -56,7 +56,7 @@
                                 <filter><artifact>org.xerial:sqlite-jdbc</artifact><excludes>
                                     <exclude>org/sqlite/native/Linux-Android/**</exclude><exclude>org/sqlite/native/Linux-Musl/**</exclude>
                                     <exclude>org/sqlite/native/FreeBSD/**</exclude><exclude>org/sqlite/native/Linux/**</exclude><exclude>org/sqlite/native/Mac/**</exclude>
-                                    <exclude>org/sqlite/native/Windows/aarch64/**</exclude><exclude>org/sqlite/native/Windows/armv7/**</exclude><exclude>org/sqlite/native/Windows/x86/**</exclude>
+                                    <exclude>org/sqlite/native/Windows/armv7/**</exclude><exclude>org/sqlite/native/Windows/x86/**</exclude>
                                 </excludes></filter>
                             </filters>
                             <transformers><transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
@@ -84,7 +84,20 @@
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId><artifactId>maven-antrun-plugin</artifactId><version>3.1.0</version>
-                <executions><execution><id>copy-compatibility-artifacts</id><phase>package</phase><goals><goal>run</goal></goals>
+                <executions>
+                <execution><id>validate-universal-payloads</id><phase>prepare-package</phase><goals><goal>run</goal></goals>
+                    <configuration><target>
+                        <fail message="Universal packaging requires both Toolscreen and liblogger architectures">
+                            <condition><not><and>
+                                <available file="${root.dir}/custom-dlls/Toolscreen_x64.dll" type="file" />
+                                <available file="${root.dir}/custom-dlls/Toolscreen_arm64.dll" type="file" />
+                                <available file="${root.dir}/src/main/resources/dlls/liblogger_x64.dll" type="file" />
+                                <available file="${root.dir}/src/main/resources/dlls/liblogger_arm64.dll" type="file" />
+                            </and></not></condition>
+                        </fail>
+                    </target></configuration>
+                </execution>
+                <execution><id>copy-compatibility-artifacts</id><phase>package</phase><goals><goal>run</goal></goals>
                     <configuration><target>
                         <copy file="${project.build.directory}/${project.build.finalName}.jar" tofile="${root.dir}/target/${project.build.finalName}.jar" overwrite="true" />
                         <copy file="${project.build.directory}/${project.build.finalName}-toolscreen-downloader.jar" tofile="${root.dir}/target/${project.build.finalName}-toolscreen-downloader.jar" overwrite="true" />

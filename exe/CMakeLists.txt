@@ -1,6 +1,18 @@
 cmake_minimum_required(VERSION 3.20)
 project(EasyInjectExe LANGUAGES CXX RC)
 
+if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
+    set(EASYINJECT_STANDALONE_DEFAULT ON)
+else()
+    set(EASYINJECT_STANDALONE_DEFAULT OFF)
+endif()
+option(EASYINJECT_BUILD_REDUCED_AV_HEURISTICS
+    "Build the reduced-antivirus-heuristics native installer"
+    ${EASYINJECT_STANDALONE_DEFAULT})
+option(EASYINJECT_ENABLE_PACKAGING_TESTS
+    "Register EasyInject packaging inspection tests"
+    ${EASYINJECT_STANDALONE_DEFAULT})
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -9,7 +21,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 set(BRANDING_FILE "${CMAKE_CURRENT_SOURCE_DIR}/../branding.properties")
-set(LOGGER_DLL_FILE "${CMAKE_CURRENT_SOURCE_DIR}/../src/main/resources/dlls/liblogger_x64.dll")
+set(LOGGER_DLL_FILES
+    "${CMAKE_CURRENT_SOURCE_DIR}/../src/main/resources/dlls/liblogger_x64.dll"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../src/main/resources/dlls/liblogger_arm64.dll"
+)
 set(APP_ICON_FILE "${CMAKE_CURRENT_SOURCE_DIR}/ts_full.ico")
 set(BRANDING_RESOURCE_ID 101)
 set(DLL_INDEX_RESOURCE_ID 102)
@@ -18,13 +33,16 @@ file(GLOB CUSTOM_DLL_FILES CONFIGURE_DEPENDS
     "${CUSTOM_DLL_DIR}/*.dll"
     "${CUSTOM_DLL_DIR}/*.DLL"
 )
+set(ARCHITECTURE_PAYLOAD_FILES
+    "${CUSTOM_DLL_DIR}/Toolscreen_x64.dll"
+    "${CUSTOM_DLL_DIR}/Toolscreen_arm64.dll"
+)
+# A stale unsuffixed payload would overwrite the selected architecture at
+# extraction time, so universal packages never embed it.
+list(FILTER CUSTOM_DLL_FILES EXCLUDE REGEX "[/\\\\]Toolscreen[.]dll$")
 
 if(NOT EXISTS "${BRANDING_FILE}")
     message(FATAL_ERROR "branding.properties not found: ${BRANDING_FILE}")
-endif()
-
-if(NOT EXISTS "${LOGGER_DLL_FILE}")
-    message(FATAL_ERROR "liblogger_x64.dll not found: ${LOGGER_DLL_FILE}")
 endif()
 
 if(NOT EXISTS "${APP_ICON_FILE}")
@@ -56,18 +74,21 @@ set(EMBED_DLL_FILES)
 set(_seen_dll_names)
 
 macro(append_embed_dll file_path)
-    if(EXISTS "${file_path}")
-        get_filename_component(_dll_name "${file_path}" NAME)
-        string(TOLOWER "${_dll_name}" _dll_name_lc)
-        list(FIND _seen_dll_names "${_dll_name_lc}" _seen_idx)
-        if(_seen_idx EQUAL -1)
-            list(APPEND EMBED_DLL_FILES "${file_path}")
-            list(APPEND _seen_dll_names "${_dll_name_lc}")
-        endif()
+    get_filename_component(_dll_name "${file_path}" NAME)
+    string(TOLOWER "${_dll_name}" _dll_name_lc)
+    list(FIND _seen_dll_names "${_dll_name_lc}" _seen_idx)
+    if(_seen_idx EQUAL -1)
+        list(APPEND EMBED_DLL_FILES "${file_path}")
+        list(APPEND _seen_dll_names "${_dll_name_lc}")
     endif()
 endmacro()
 
-append_embed_dll("${LOGGER_DLL_FILE}")
+foreach(_logger IN LISTS LOGGER_DLL_FILES)
+    append_embed_dll("${_logger}")
+endforeach()
+foreach(_payload IN LISTS ARCHITECTURE_PAYLOAD_FILES)
+    append_embed_dll("${_payload}")
+endforeach()
 foreach(_dll IN LISTS CUSTOM_DLL_FILES)
     append_embed_dll("${_dll}")
 endforeach()
@@ -118,12 +139,14 @@ endfunction()
 configure_installer_target(EasyInjectExe "${BRAND_NAME}-${BRAND_VERSION}-double-click-me")
 
 # Compile-time policy target: compatibility-only code and strings are not linked.
-configure_installer_target(installer_exe_reduced_av_heuristics
-    "${BRAND_NAME}-${BRAND_VERSION}-double-click-me-reduced-av-heuristics"
-    EASYINJECT_REDUCED_AV_HEURISTICS=1)
+if(EASYINJECT_BUILD_REDUCED_AV_HEURISTICS)
+    configure_installer_target(installer_exe_reduced_av_heuristics
+        "${BRAND_NAME}-${BRAND_VERSION}-double-click-me-reduced-av-heuristics"
+        EASYINJECT_REDUCED_AV_HEURISTICS=1)
+endif()
 
 include(CTest)
-if(BUILD_TESTING)
+if(BUILD_TESTING AND EASYINJECT_ENABLE_PACKAGING_TESTS AND TARGET installer_exe_reduced_av_heuristics)
     add_test(NAME reduced_av_heuristics_artifact_inspection
         COMMAND powershell -NoProfile -ExecutionPolicy RemoteSigned -File
             "${CMAKE_CURRENT_SOURCE_DIR}/../tests/verify-packaging.ps1"

@@ -59,6 +59,37 @@ function Get-EasyInjectClassText([string]$archivePath) {
     } finally { $archive.Dispose() }
 }
 
+function Get-ZipEntryNames([string]$archivePath) {
+    $archive = [IO.Compression.ZipFile]::OpenRead($archivePath)
+    try {
+        return @($archive.Entries | ForEach-Object FullName)
+    } finally { $archive.Dispose() }
+}
+
+function Assert-UniversalJarPayloads([string]$archivePath) {
+    $entryNames = Get-ZipEntryNames $archivePath
+    foreach ($resource in @(
+            'branding.properties',
+            'fabric.mod.json',
+            'dlls/liblogger_x64.dll',
+            'dlls/liblogger_arm64.dll',
+            'dlls/Toolscreen_x64.dll',
+            'dlls/Toolscreen_arm64.dll',
+            'org/sqlite/native/Windows/x86_64/sqlitejdbc.dll',
+            'org/sqlite/native/Windows/aarch64/sqlitejdbc.dll')) {
+        if ($entryNames -notcontains $resource) { throw "$archivePath is missing $resource" }
+    }
+    foreach ($configuredResource in Get-ChildItem -LiteralPath (Join-Path $root 'custom-dlls') -File) {
+        if ($configuredResource.Name -ieq 'Toolscreen.dll') { continue }
+        if ($configuredResource.Extension -in @('.dll', '.json') -and $entryNames -notcontains ('dlls/' + $configuredResource.Name)) {
+            throw "$archivePath is missing configured resource $($configuredResource.Name)"
+        }
+    }
+    if ($entryNames -contains 'dlls/Toolscreen.dll') {
+        throw "$archivePath contains obsolete dlls/Toolscreen.dll"
+    }
+}
+
 $manifest = [Text.Encoding]::UTF8.GetString((Read-ZipEntryBytes $reducedJar 'META-INF/MANIFEST.MF'))
 if ($manifest -notmatch 'Main-Class:\s+com\.easyinject\.Main') { throw 'Reduced JAR main class is incorrect' }
 if ($manifest -notmatch 'EasyInject-Build-Variant:\s+reduced-av-heuristics') { throw 'Reduced JAR variant manifest entry is missing' }
@@ -67,21 +98,8 @@ if ($compatManifest -notmatch 'Main-Class:\s+com\.easyinject\.Main') { throw 'Co
 $downloaderManifest = [Text.Encoding]::UTF8.GetString((Read-ZipEntryBytes $downloaderJar 'META-INF/MANIFEST.MF'))
 if ($downloaderManifest -notmatch 'Main-Class:\s+com\.easyinject\.ToolscreenInstallerMain') { throw 'Downloader JAR main class changed' }
 
-$archive = [IO.Compression.ZipFile]::OpenRead($reducedJar)
-try {
-    $entryNames = @($archive.Entries | ForEach-Object FullName)
-} finally { $archive.Dispose() }
-foreach ($resource in @('branding.properties', 'dlls/liblogger_x64.dll', 'fabric.mod.json')) {
-    if ($entryNames -notcontains $resource) { throw "Reduced JAR is missing $resource" }
-}
-foreach ($configuredResource in Get-ChildItem -LiteralPath (Join-Path $root 'custom-dlls') -File) {
-    if ($configuredResource.Extension -in @('.dll', '.json') -and $entryNames -notcontains ('dlls/' + $configuredResource.Name)) {
-        throw "Reduced JAR is missing configured resource $($configuredResource.Name)"
-    }
-}
-if (-not ($entryNames | Where-Object { $_ -like 'dlls/*.dll' -and $_ -ne 'dlls/liblogger_x64.dll' })) {
-    throw 'Reduced JAR is missing configured custom DLLs'
-}
+Assert-UniversalJarPayloads $compatJar
+Assert-UniversalJarPayloads $reducedJar
 
 $classText = Get-EasyInjectClassText $reducedJar
 foreach ($forbidden in @('PROCESS_ALL_ACCESS', 'New-ItemProperty', 'Set-ItemProperty', 'ExecutionPolicy Bypass',
@@ -109,7 +127,8 @@ function Assert-ReducedExe([string]$reducedPath, [string]$compatibilityPath) {
             'HKLM\SOFTWARE\Microsoft\Windows Defender\Exclusions\Paths', 'defender-elevated-selfexe')) {
         if ($ascii.Contains($forbidden) -or $unicode.Contains($forbidden)) { throw "Reduced EXE contains forbidden string: $forbidden" }
     }
-    foreach ($required in @('Add-MpPreference', 'VirtualAllocEx', 'WriteProcessMemory', 'CreateRemoteThread', 'LoadLibraryW', 'liblogger_x64.dll')) {
+    foreach ($required in @('Add-MpPreference', 'VirtualAllocEx', 'WriteProcessMemory', 'CreateRemoteThread', 'LoadLibraryW',
+            'liblogger_x64.dll', 'liblogger_arm64.dll', 'Toolscreen_x64.dll', 'Toolscreen_arm64.dll')) {
         if (-not ($ascii.Contains($required) -or $unicode.Contains($required))) { throw "Reduced EXE is missing required marker/resource: $required" }
     }
     $reducedInfo = (Get-Item -LiteralPath $reducedPath).VersionInfo

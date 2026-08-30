@@ -18,6 +18,7 @@ buildNumber.properties
 custom-dlls
 
 exe/build
+exe/build-*
 exe/CMakeFiles
 exe/EasyInjectExe.dir
 exe/Release

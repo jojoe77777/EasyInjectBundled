@@ -5,9 +5,26 @@ import org.junit.jupiter.api.Test;
 import java.util.Properties;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class VariantPolicyTest {
+    @Test
+    void universalPayloadSelectionUsesTheRuntimeArchitecture() {
+        assertEquals("arm64", Main.payloadArchitectureFor("aarch64"));
+        assertEquals("arm64", Main.payloadArchitectureFor("ARM64"));
+        assertEquals("x64", Main.payloadArchitectureFor("amd64"));
+        assertEquals("x64", Main.payloadArchitectureFor("x86_64"));
+
+        assertTrue(Main.isPayloadForArchitecture("Toolscreen_arm64.dll", "arm64"));
+        assertTrue(Main.isPayloadForArchitecture("liblogger_x64.dll", "x64"));
+        assertTrue(Main.isPayloadForArchitecture("VK_LAYER_TOOLSCREEN_obs_redirect.json", "arm64"));
+        assertFalse(Main.isPayloadForArchitecture("Toolscreen_x64.dll", "arm64"));
+        assertFalse(Main.isPayloadForArchitecture("liblogger_arm64.dll", "x64"));
+        assertEquals("Toolscreen.dll", Main.installedPayloadName("Toolscreen_x64.dll"));
+        assertEquals("Toolscreen.dll", Main.installedPayloadName("toolscreen_ARM64.dll"));
+    }
+
     @Test
     void buildVariantAndInjectionRightsMatchPackagedPolicy() {
         // <compatibility-policy>
