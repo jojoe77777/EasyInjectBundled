@@ -33,6 +33,10 @@ file(GLOB CUSTOM_DLL_FILES CONFIGURE_DEPENDS
     "${CUSTOM_DLL_DIR}/*.dll"
     "${CUSTOM_DLL_DIR}/*.DLL"
 )
+file(GLOB CUSTOM_SUPPORT_RESOURCE_FILES CONFIGURE_DEPENDS
+    "${CUSTOM_DLL_DIR}/*.json"
+    "${CUSTOM_DLL_DIR}/*.JSON"
+)
 set(ARCHITECTURE_PAYLOAD_FILES
     "${CUSTOM_DLL_DIR}/Toolscreen_x64.dll"
     "${CUSTOM_DLL_DIR}/Toolscreen_arm64.dll"
@@ -91,6 +95,9 @@ foreach(_payload IN LISTS ARCHITECTURE_PAYLOAD_FILES)
 endforeach()
 foreach(_dll IN LISTS CUSTOM_DLL_FILES)
     append_embed_dll("${_dll}")
+endforeach()
+foreach(_resource IN LISTS CUSTOM_SUPPORT_RESOURCE_FILES)
+    append_embed_dll("${_resource}")
 endforeach()
 
 set(EMBED_DLL_INDEX_FILE "${CMAKE_CURRENT_BINARY_DIR}/embedded_dll_index.txt")

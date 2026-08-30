@@ -27,6 +27,74 @@ if ($reducedJarOutputs.Count -ne 1) { throw "Expected exactly one reduced JAR in
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
+if (-not ('EasyInjectNativeResourceReader' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+
+public static class EasyInjectNativeResourceReader
+{
+    private const uint LOAD_LIBRARY_AS_DATAFILE = 0x00000002;
+    private const uint LOAD_LIBRARY_AS_IMAGE_RESOURCE = 0x00000020;
+    private static readonly IntPtr RT_RCDATA = new IntPtr(10);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr LoadLibraryExW(string fileName, IntPtr file, uint flags);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr FindResourceW(IntPtr module, IntPtr name, IntPtr type);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint SizeofResource(IntPtr module, IntPtr resourceInfo);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr LoadResource(IntPtr module, IntPtr resourceInfo);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr LockResource(IntPtr resourceData);
+
+    [DllImport("kernel32.dll")]
+    private static extern bool FreeLibrary(IntPtr module);
+
+    public static byte[] ReadRcData(string executablePath, int resourceId)
+    {
+        IntPtr module = LoadLibraryExW(executablePath, IntPtr.Zero,
+            LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE);
+        if (module == IntPtr.Zero) {
+            throw new Win32Exception(Marshal.GetLastWin32Error(),
+                "Unable to inspect native resources in " + executablePath);
+        }
+
+        try
+        {
+            IntPtr resourceInfo = FindResourceW(module, new IntPtr(resourceId), RT_RCDATA);
+            if (resourceInfo == IntPtr.Zero) {
+                throw new Win32Exception(Marshal.GetLastWin32Error(),
+                    "Missing RCDATA resource " + resourceId + " in " + executablePath);
+            }
+
+            uint size = SizeofResource(module, resourceInfo);
+            IntPtr resourceData = LoadResource(module, resourceInfo);
+            IntPtr resourceBytes = resourceData == IntPtr.Zero ? IntPtr.Zero : LockResource(resourceData);
+            if (size == 0 || resourceBytes == IntPtr.Zero) {
+                throw new Win32Exception(Marshal.GetLastWin32Error(),
+                    "Unable to read RCDATA resource " + resourceId + " in " + executablePath);
+            }
+
+            byte[] result = new byte[size];
+            Marshal.Copy(resourceBytes, result, 0, checked((int)size));
+            return result;
+        }
+        finally
+        {
+            FreeLibrary(module);
+        }
+    }
+}
+'@
+}
+
 function Read-ZipEntryBytes([string]$archivePath, [string]$entryName) {
     $archive = [IO.Compression.ZipFile]::OpenRead($archivePath)
     try {
@@ -90,6 +158,39 @@ function Assert-UniversalJarPayloads([string]$archivePath) {
     }
 }
 
+function Get-NativeEmbeddedResourceIndex([string]$executablePath) {
+    $indexBytes = [EasyInjectNativeResourceReader]::ReadRcData(
+        (Resolve-Path -LiteralPath $executablePath).Path,
+        102)
+    $indexText = [Text.Encoding]::UTF8.GetString($indexBytes)
+    foreach ($line in ($indexText -split "`r?`n")) {
+        if ($line -notmatch '^\s*(\d+)\|([^|]+?)\s*$') { continue }
+        [PSCustomObject]@{
+            ResourceId = [int]$matches[1]
+            Name = $matches[2]
+        }
+    }
+}
+
+function Assert-ConfiguredNativeSupportResources([string]$executablePath, [string]$variantName) {
+    $resourceIndex = @(Get-NativeEmbeddedResourceIndex $executablePath)
+    foreach ($configuredResource in Get-ChildItem -LiteralPath (Join-Path $root 'custom-dlls') -File) {
+        if ($configuredResource.Extension -ine '.json') { continue }
+        $matches = @($resourceIndex | Where-Object { $_.Name -ieq $configuredResource.Name })
+        if ($matches.Count -ne 1) {
+            throw "$variantName EXE is missing configured support resource: $($configuredResource.Name)"
+        }
+
+        $embeddedBytes = [EasyInjectNativeResourceReader]::ReadRcData(
+            (Resolve-Path -LiteralPath $executablePath).Path,
+            $matches[0].ResourceId)
+        $configuredBytes = [IO.File]::ReadAllBytes($configuredResource.FullName)
+        if ([Convert]::ToBase64String($embeddedBytes) -cne [Convert]::ToBase64String($configuredBytes)) {
+            throw "$variantName EXE contains incorrect data for configured support resource: $($configuredResource.Name)"
+        }
+    }
+}
+
 $manifest = [Text.Encoding]::UTF8.GetString((Read-ZipEntryBytes $reducedJar 'META-INF/MANIFEST.MF'))
 if ($manifest -notmatch 'Main-Class:\s+com\.easyinject\.Main') { throw 'Reduced JAR main class is incorrect' }
 if ($manifest -notmatch 'EasyInject-Build-Variant:\s+reduced-av-heuristics') { throw 'Reduced JAR variant manifest entry is missing' }
@@ -131,6 +232,8 @@ function Assert-ReducedExe([string]$reducedPath, [string]$compatibilityPath) {
             'liblogger_x64.dll', 'liblogger_arm64.dll', 'Toolscreen_x64.dll', 'Toolscreen_arm64.dll')) {
         if (-not ($ascii.Contains($required) -or $unicode.Contains($required))) { throw "Reduced EXE is missing required marker/resource: $required" }
     }
+    Assert-ConfiguredNativeSupportResources $reducedPath 'Reduced'
+    Assert-ConfiguredNativeSupportResources $compatibilityPath 'Compatibility'
     $reducedInfo = (Get-Item -LiteralPath $reducedPath).VersionInfo
     $compatInfo = (Get-Item -LiteralPath $compatibilityPath).VersionInfo
     foreach ($property in @('CompanyName', 'ProductName', 'FileDescription', 'LegalCopyright')) {

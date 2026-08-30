@@ -9,8 +9,9 @@
  *   - Install Mode (double-click): detect instance.cfg / instance.json, install PreLaunchCommand,
  *     Windows Defender exclusion
  *
- * DLLs and branding.properties are embedded directly in the EXE as Win32 resources.
- * At runtime, embedded DLLs are extracted to %USERPROFILE%/.config/<brand>/dlls for injection.
+ * DLLs, support files, and branding.properties are embedded directly in the EXE as Win32 resources.
+ * At runtime, embedded payload resources are extracted to %USERPROFILE%/.config/<brand>/dlls.
+ * Only extracted DLLs are passed to the injector.
  * The auto-updater downloads an .exe from GitHub releases.
  */
 
@@ -103,7 +104,7 @@ static std::string g_updateApiUrl;
 static std::string g_releasesUrl;
 static std::string g_assetNameRegex;
 
-struct EmbeddedDllEntry {
+struct EmbeddedResourceEntry {
     int resourceId;
     std::string fileName;
 };
@@ -1189,8 +1190,8 @@ static bool loadEmbeddedResourceText(int resourceId, std::string& outText) {
     return true;
 }
 
-static std::vector<EmbeddedDllEntry> getEmbeddedDllEntries() {
-    std::vector<EmbeddedDllEntry> entries;
+static std::vector<EmbeddedResourceEntry> getEmbeddedResourceEntries() {
+    std::vector<EmbeddedResourceEntry> entries;
     std::string manifest;
     if (!loadEmbeddedResourceText(DLL_INDEX_RESOURCE_ID, manifest)) return entries;
 
@@ -2625,21 +2626,30 @@ static bool maybeUpdateAndRescheduleWatcher(const fs::path& workingDir) {
 } // namespace Updater
 
 // ============================================================================
-// DLL discovery and copying
+// Embedded payload discovery and extraction
 // ============================================================================
 
+static bool isInjectableDllResourceName(const std::string& fileName) {
+    const std::string lowerName = toLower(fileName);
+    return lowerName.size() >= 4 &&
+        lowerName.compare(lowerName.size() - 4, 4, ".dll") == 0;
+}
+
 /**
- * Copy embedded DLL resources to the persistent extraction directory.
+ * Copy embedded payload resources to the persistent extraction directory.
+ *
+ * Support resources such as Vulkan layer manifests are written beside the
+ * selected Toolscreen.dll, but only DLL paths are returned for injection.
  */
-static std::vector<fs::path> copyDllsToPersistentDir() {
-    std::vector<fs::path> result;
+static std::vector<fs::path> extractEmbeddedResourcesToPersistentDir() {
+    std::vector<fs::path> injectableDlls;
     fs::path destDir = getPreferredPersistentDllDir();
     fs::create_directories(destDir);
 
-    auto bundled = getEmbeddedDllEntries();
+    auto bundled = getEmbeddedResourceEntries();
     const std::string payloadArch = toUtf8(PAYLOAD_ARCH);
     const bool hasMatchingArchitectureSpecificToolscreen = std::any_of(
-        bundled.begin(), bundled.end(), [&payloadArch](const EmbeddedDllEntry& entry) {
+        bundled.begin(), bundled.end(), [&payloadArch](const EmbeddedResourceEntry& entry) {
             return toLower(entry.fileName) == "toolscreen_" + payloadArch + ".dll";
         });
     for (auto& entry : bundled) {
@@ -2655,7 +2665,7 @@ static std::vector<fs::path> copyDllsToPersistentDir() {
 
         std::vector<uint8_t> data;
         if (!loadEmbeddedResourceBytes(entry.resourceId, data)) {
-            logMsg("[DLL] Missing embedded resource for " + entry.fileName);
+            logMsg("[Payload] Missing embedded resource for " + entry.fileName);
             continue;
         }
 
@@ -2671,12 +2681,14 @@ static std::vector<fs::path> copyDllsToPersistentDir() {
                 out.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
             }
             if (!out.good()) throw std::runtime_error("Failed while writing destination file");
-            result.push_back(dest);
+            if (isInjectableDllResourceName(entry.fileName)) {
+                injectableDlls.push_back(dest);
+            }
         } catch (const std::exception& e) {
-            logMsg("[DLL] Failed to extract " + entry.fileName + ": " + e.what());
+            logMsg("[Payload] Failed to extract " + entry.fileName + ": " + e.what());
         }
     }
-    return result;
+    return injectableDlls;
 }
 
 // ============================================================================
@@ -3009,34 +3021,39 @@ static bool isLikelyMinecraftCommandLine(const std::wstring& cmdLine) {
 // ============================================================================
 
 /**
- * Info mode: list bundled DLLs with hashes.
+ * Info mode: list bundled payload resources with hashes.
  */
 static int runInfoMode() {
     std::cout << "===========================================" << std::endl;
     std::cout << "  " << g_projectName << " v" << g_version << std::endl;
     std::cout << "===========================================" << std::endl;
     std::cout << std::endl;
-    std::cout << "Bundled DLLs:" << std::endl;
+    std::cout << "Bundled payload resources:" << std::endl;
     std::cout << "-------------------------------------------" << std::endl;
 
-    auto dlls = getEmbeddedDllEntries();
-    for (auto& dll : dlls) {
+    auto resources = getEmbeddedResourceEntries();
+    for (auto& resource : resources) {
         std::vector<uint8_t> data;
-        if (!loadEmbeddedResourceBytes(dll.resourceId, data)) {
+        if (!loadEmbeddedResourceBytes(resource.resourceId, data)) {
             std::cout << std::endl;
-            std::cout << "  Name:   " << dll.fileName << std::endl;
+            std::cout << "  Name:   " << resource.fileName << std::endl;
             std::cout << "  Error:  missing embedded resource" << std::endl;
             continue;
         }
         std::string hash = computeSha512(data);
         std::cout << std::endl;
-        std::cout << "  Name:   " << dll.fileName << std::endl;
+        std::cout << "  Name:   " << resource.fileName << std::endl;
+        std::cout << "  Type:   "
+                  << (isInjectableDllResourceName(resource.fileName)
+                          ? "injectable DLL"
+                          : "support resource")
+                  << std::endl;
         std::cout << "  Size:   " << data.size() << " bytes" << std::endl;
         std::cout << "  SHA512: " << hash << std::endl;
     }
     std::cout << std::endl;
     std::cout << "-------------------------------------------" << std::endl;
-    std::cout << "Total: " << dlls.size() << " DLL(s) bundled" << std::endl;
+    std::cout << "Total: " << resources.size() << " resource(s) bundled" << std::endl;
     return 0;
 }
 
@@ -3078,10 +3095,10 @@ static int runWatcherMode() {
     logMsg("[" + g_projectName + "] Target instance directories:");
     for (auto& d : targetDirs) logMsg("[" + g_projectName + "]   - " + toUtf8(d));
 
-    // Copy DLLs to persistent directory
+    // Extract DLLs and adjacent support resources to the persistent directory.
     fs::path persistentDllDir = getPreferredPersistentDllDir();
-    logMsg("[" + g_projectName + "] Copying DLLs to: " + persistentDllDir.string());
-    auto dlls = copyDllsToPersistentDir();
+    logMsg("[" + g_projectName + "] Extracting payload resources to: " + persistentDllDir.string());
+    auto dlls = extractEmbeddedResourcesToPersistentDir();
     if (dlls.empty()) {
         logMsg("[" + g_projectName + "] No DLLs found - exiting");
         closeLogging();
