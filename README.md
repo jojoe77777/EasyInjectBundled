@@ -12,6 +12,33 @@ Configure `brand.name`, `brand.version`, and update URLs in `branding.properties
 
 Both architectures are packaged into each installer. At runtime EasyInject extracts only the payload matching the native injector or JVM architecture, installs the selected Toolscreen payload as `Toolscreen.dll`, and uses its matching `liblogger_<arch>.dll`. Both Windows x86-64 and ARM64 SQLite JNI libraries remain in the JARs for the same reason.
 
+## Native installer capabilities
+
+The native compatibility and reduced-heuristics EXEs support the JAR installer's
+launcher workflows without requiring Java to run the installer:
+
+| Launcher | Native setup behavior |
+| --- | --- |
+| Prism / MultiMC | Install and repair the command in `[General]`; keep, replace, or cancel an existing command; restart the launcher after setup |
+| ATLauncher | Wait for the launcher to close, update only its launcher JSON settings, and preserve existing commands when requested |
+| Modrinth | Detect default/custom profile directories, update legacy or current SQLite/JSONB hooks, preserve unrelated overrides, and uninstall the hook |
+| MCSR Launcher | Detect managed instances before copying files and direct the user to the launcher's built-in ToolScreen option |
+
+Modrinth database access uses the vendored, statically linked SQLite library.
+It does not require a SQLite executable, DLL, or JVM. An existing hook belonging
+to another tool is left intact and must be removed in Modrinth before installation.
+
+Native forwarding preserves existing commands across reinstall, runs them before
+`prelaunch.txt`, and stops launch on a command failure. New forwarding uses an
+encoded argument plus explicit launcher-variable arguments to avoid nested
+command quoting; legacy JAR forwarding remains readable. The legacy lite native
+frontend shares these launcher features and now also offers uninstall. Its
+existing omission of automatic Defender configuration remains intentional.
+
+The native watcher recognizes vanilla, Fabric, Quilt, Forge, Prism and MultiMC
+entry points and still verifies the target instance directory and leaf JVM before
+injection. Use the EXE built for the target JVM architecture (x64 or ARM64).
+
 Run the normal full build from a Developer PowerShell or Command Prompt:
 
 ```bat

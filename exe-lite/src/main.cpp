@@ -47,6 +47,12 @@
 #include <vector>
 
 #include "../../common/instance_cfg.h"
+#include "../../common/modrinth.h"
+#include "../../common/prelaunch.h"
+#include "../../common/launcher_support.h"
+#include "../../common/instance_json.h"
+#include "../../common/config_file.h"
+#include "../../common/process_capture.h"
 
 namespace fs = std::filesystem;
 
@@ -70,13 +76,23 @@ static const wchar_t* WATCHER_ARG        = L"--watcher";
 static const wchar_t* INFO_ARG           = L"--info";
 static const wchar_t* PRELAUNCH_ARG      = L"--prelaunch";
 static const wchar_t* FORWARDED_PRELAUNCH_CHAIN_ARG = L"--run-prelaunch-chain";
-static const wchar_t* LOGGER_DLL_NAME   = L"liblogger_x64.dll";
+static std::wstring detectNativePayloadArchitecture() {
+#if defined(_M_ARM64)
+    return L"arm64";
+#else
+    // The injected DLL must match this injector process. In particular, an
+    // x64 build running under emulation on ARM64 Windows still needs x64 DLLs.
+    return L"x64";
+#endif
+}
+
+static const std::wstring PAYLOAD_ARCH = detectNativePayloadArchitecture();
+static const std::wstring LOGGER_DLL_NAME = L"liblogger_" + PAYLOAD_ARCH + L".dll";
 static const wchar_t* LOG_FILE_NAME     = L"injector.log";
 static const int BRANDING_RESOURCE_ID = 101;
 static const int DLL_INDEX_RESOURCE_ID = 102;
 static const int POLL_INTERVAL_MS       = 500;
-static const int TARGET_LEAF_RECHECK_MS = 2000;
-static const int TIMEOUT_SECONDS        = 60;
+static const int TIMEOUT_SECONDS        = 120;
 
 // ============================================================================
 // Branding globals
@@ -773,6 +789,9 @@ static bool ensureDialogClassRegistered() {
             }
 
             case WM_NCDESTROY: {
+                // Wake GetMessage if a cross-thread sent message destroyed the dialog.
+                // WM_QUIT would also terminate a subsequent installer dialog's loop.
+                PostThreadMessageW(GetCurrentThreadId(), WM_NULL, 0, 0);
                 if (state) {
                     if (state->titleFont) DeleteObject(state->titleFont);
                     if (state->bodyFont) DeleteObject(state->bodyFont);
@@ -1222,46 +1241,8 @@ struct ExecResult {
 };
 
 static ExecResult execCommandCapture(const std::wstring& cmdLine) {
-    ExecResult result;
-    SECURITY_ATTRIBUTES sa{};
-    sa.nLength = sizeof(sa);
-    sa.bInheritHandle = TRUE;
-    HANDLE hReadPipe, hWritePipe;
-    if (!CreatePipe(&hReadPipe, &hWritePipe, &sa, 0)) return result;
-    SetHandleInformation(hReadPipe, HANDLE_FLAG_INHERIT, 0);
-
-    STARTUPINFOW si{};
-    si.cb = sizeof(si);
-    si.hStdOutput = hWritePipe;
-    si.hStdError  = hWritePipe;
-    si.dwFlags    = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-    PROCESS_INFORMATION pi{};
-
-    std::wstring cmd = cmdLine; // mutable copy
-    if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
-        CloseHandle(hReadPipe);
-        CloseHandle(hWritePipe);
-        return result;
-    }
-    CloseHandle(hWritePipe);
-
-    std::string output;
-    char buf[4096];
-    DWORD bytesRead;
-    while (ReadFile(hReadPipe, buf, sizeof(buf), &bytesRead, nullptr) && bytesRead > 0)
-        output.append(buf, bytesRead);
-    CloseHandle(hReadPipe);
-
-    WaitForSingleObject(pi.hProcess, 60000);
-    DWORD exitCode = 1;
-    GetExitCodeProcess(pi.hProcess, &exitCode);
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
-
-    result.exitCode = (int)exitCode;
-    result.output = output;
-    return result;
+    auto result = ProcessCapture::run(cmdLine);
+    return {result.exitCode, result.output};
 }
 
 static std::string readTextFile(const fs::path& p) {
@@ -2219,20 +2200,51 @@ static bool maybeUpdateAndRescheduleWatcher(const fs::path& workingDir) {
 /**
  * Copy embedded DLL resources to the persistent extraction directory.
  */
+static bool isInjectableDllResourceName(const std::string& fileName) {
+    const std::string lowerName = toLower(fileName);
+    return lowerName.size() >= 4 &&
+        lowerName.compare(lowerName.size() - 4, 4, ".dll") == 0;
+}
+
+/**
+ * Copy embedded payload resources to the persistent extraction directory.
+ *
+ * Support resources such as Vulkan layer manifests are written beside the
+ * selected Toolscreen.dll, but only DLL paths are returned for injection.
+ */
 static std::vector<fs::path> copyDllsToPersistentDir() {
-    std::vector<fs::path> result;
+    std::vector<fs::path> injectableDlls;
     fs::path destDir = getPreferredPersistentDllDir();
     fs::create_directories(destDir);
 
     auto bundled = getEmbeddedDllEntries();
+    const std::string payloadArch = toUtf8(PAYLOAD_ARCH);
+    const bool hasMatchingArchitectureSpecificToolscreen = std::any_of(
+        bundled.begin(), bundled.end(), [&payloadArch](const EmbeddedDllEntry& entry) {
+            return toLower(entry.fileName) == "toolscreen_" + payloadArch + ".dll";
+        });
     for (auto& entry : bundled) {
-        std::vector<uint8_t> data;
-        if (!loadEmbeddedResourceBytes(entry.resourceId, data)) {
-            logMsg("[DLL] Missing embedded resource for " + entry.fileName);
+        const std::string lowerName = toLower(entry.fileName);
+        if (hasMatchingArchitectureSpecificToolscreen && lowerName == "toolscreen.dll") {
+            continue;
+        }
+        const bool x64Payload = lowerName == "liblogger_x64.dll" || lowerName == "toolscreen_x64.dll";
+        const bool arm64Payload = lowerName == "liblogger_arm64.dll" || lowerName == "toolscreen_arm64.dll";
+        if ((x64Payload && payloadArch != "x64") || (arm64Payload && payloadArch != "arm64")) {
             continue;
         }
 
-        fs::path dest = destDir / toWide(entry.fileName);
+        std::vector<uint8_t> data;
+        if (!loadEmbeddedResourceBytes(entry.resourceId, data)) {
+            logMsg("[Payload] Missing embedded resource for " + entry.fileName);
+            continue;
+        }
+
+        const std::string installedName =
+            (lowerName == "toolscreen_x64.dll" || lowerName == "toolscreen_arm64.dll")
+                ? "Toolscreen.dll"
+                : entry.fileName;
+        fs::path dest = destDir / toWide(installedName);
         try {
             std::ofstream out(dest, std::ios::binary | std::ios::trunc);
             if (!out.is_open()) throw std::runtime_error("Unable to open destination file");
@@ -2240,12 +2252,14 @@ static std::vector<fs::path> copyDllsToPersistentDir() {
                 out.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
             }
             if (!out.good()) throw std::runtime_error("Failed while writing destination file");
-            result.push_back(dest);
+            if (isInjectableDllResourceName(entry.fileName)) {
+                injectableDlls.push_back(dest);
+            }
         } catch (const std::exception& e) {
-            logMsg("[DLL] Failed to extract " + entry.fileName + ": " + e.what());
+            logMsg("[Payload] Failed to extract " + entry.fileName + ": " + e.what());
         }
     }
-    return result;
+    return injectableDlls;
 }
 
 // ============================================================================
@@ -2271,22 +2285,35 @@ static std::string buildPreLaunchCommand(const std::string& exeRelativePath, boo
     return "\"" + exePath + "\" --prelaunch";
 }
 
-static bool isOurSegment(const std::string& segment) {
-    // Check if segment contains our project name (alphanumeric comparison)
-    auto normalize = [](const std::string& s) {
-        std::string out;
-        for (char c : s) {
-            if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) out += c;
-            else if (c >= 'A' && c <= 'Z') out += (char)(c + 32);
+
+static bool resolveCommand(const std::string& existing, const std::string& command, std::string& resolved) {
+    auto plan = Prelaunch::merge(existing, command, g_projectName);
+    resolved = plan.keep;
+    if (!plan.needsChoice) return true;
+    int choice = Ui::showDialog(toWide(g_projectName + " � Existing Pre-Launch Command"),
+        toWide("This instance already has a pre-launch command:\n\n" + existing
+            + "\n\nKeep it and run it before the watcher, or replace it?"),
+        Ui::DialogTone::Warning, {{IDYES, L"Keep Existing", true}, {IDNO, L"Replace Command"}, {IDCANCEL, L"Cancel"}},
+        IDCANCEL, true, L"Existing Pre-Launch Command", 760);
+    if (choice == IDNO) resolved = plan.replace;
+    return choice == IDYES || choice == IDNO;
+}
+
+static bool ensureAtLauncherClosed() {
+    for (;;) {
+        bool running = !ProcessUtils::findProcessesByImageNames({L"ATLauncher.exe"}).empty();
+        for (const auto& process : ProcessUtils::findProcessesByImageNames({L"java.exe", L"javaw.exe"})) {
+            if (LauncherSupport::isAtLauncher(toUtf8(ProcessUtils::getProcessCommandLine(process.processId)))) running = true;
         }
-        return out;
-    };
-    return normalize(segment).find(normalize(g_projectName)) != std::string::npos;
+        if (!running) return true;
+        if (Ui::showDialog(L"ATLauncher Is Running", L"Close ATLauncher before changing this instance's commands, then click Retry.",
+            Ui::DialogTone::Warning, {{IDRETRY, L"Retry", true}, {IDCANCEL, L"Cancel"}}, IDCANCEL) != IDRETRY) return false;
+    }
 }
 
 static InstallResult installPreLaunchCommandCfg(const fs::path& cfgFile, const std::string& command) {
     std::ifstream fin(cfgFile);
-    if (!fin.is_open()) return {false, "Cannot read " + cfgFile.string()};
+    if (!fin.is_open()) return {false, "Cannot read " + cfgFile.u8string()};
 
     std::vector<std::string> lines;
     std::string line;
@@ -2294,115 +2321,40 @@ static InstallResult installPreLaunchCommandCfg(const fs::path& cfgFile, const s
         if (!line.empty() && line.back() == '\r') line.pop_back();
         lines.push_back(line);
     }
+    if (fin.bad()) return {false, "Cannot read " + cfgFile.u8string()};
     fin.close();
 
-    const auto updated = InstanceCfg::update(lines, command);
+    try {
+        std::string resolved;
+        if (!resolveCommand(Prelaunch::decodeIni(InstanceCfg::preLaunchCommand(lines)), Prelaunch::decodeIni(command), resolved))
+            return {false, "Installation cancelled; existing command preserved."};
+        const auto updated = InstanceCfg::update(lines, Prelaunch::encodeIni(resolved));
 
-    std::ofstream fout(cfgFile);
-    if (!fout.is_open()) return {false, "Cannot write " + cfgFile.string()};
-    for (auto& l : updated) fout << l << "\n";
-    return {true, ""};
-}
-
-static std::string extractJsonStringValue(const std::string& line) {
-    auto colon = line.find(':');
-    if (colon == std::string::npos) return {};
-    auto startQuote = line.find('"', colon + 1);
-    if (startQuote == std::string::npos) return {};
-    std::string val;
-    bool esc = false;
-    for (size_t i = startQuote + 1; i < line.size(); i++) {
-        char c = line[i];
-        if (esc) {
-            switch (c) {
-                case 'n': val += '\n'; break;
-                case 'r': val += '\r'; break;
-                case 't': val += '\t'; break;
-                default: val += c;
-            }
-            esc = false;
-            continue;
-        }
-        if (c == '\\') { esc = true; continue; }
-        if (c == '"') break;
-        val += c;
+        ConfigFile::writeLines(cfgFile, updated);
+        return {true, ""};
+    } catch (const std::exception& e) {
+        return {false, e.what()};
     }
-    return val;
 }
+
 
 static InstallResult installPreLaunchCommandJson(const fs::path& jsonFile, const std::string& command) {
-    std::ifstream fin(jsonFile);
-    if (!fin.is_open()) return {false, "Cannot read " + jsonFile.string()};
-
-    std::vector<std::string> lines;
-    std::string line;
-    bool foundEnable = false, foundPreLaunch = false;
-    int launcherBraceLine = -1;
-    int preLaunchLineIndex = -1;
-
-    while (std::getline(fin, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        lines.push_back(line);
+    if (!ensureAtLauncherClosed()) return {false, "Installation cancelled; close ATLauncher and retry."};
+    try {
+        std::ifstream fin(jsonFile, std::ios::binary);
+        if (!fin) return {false, "Cannot read " + jsonFile.u8string()};
+        std::string text((std::istreambuf_iterator<char>(fin)), std::istreambuf_iterator<char>());
+        if (fin.bad()) return {false, "Cannot read " + jsonFile.u8string()};
+        fin.close();
+        auto root = InstanceJson::parse(text);
+        const auto existing = InstanceJson::preLaunchCommand(root);
+        std::string resolved;
+        if (!resolveCommand(existing, command, resolved)) return {false, "Installation cancelled; existing command preserved."};
+        ConfigFile::write(jsonFile, InstanceJson::update(root, resolved));
+        return {true, ""};
+    } catch (const std::exception& e) {
+        return {false, e.what()};
     }
-    fin.close();
-
-    for (int i = 0; i < (int)lines.size(); i++) {
-        std::string trimmed = trim(lines[i]);
-        if (trimmed.find("\"launcher\"") != std::string::npos && trimmed.find('{') != std::string::npos)
-            launcherBraceLine = i;
-        if (trimmed.find("\"enableCommands\"") != std::string::npos) {
-            std::string indent = lines[i].substr(0, lines[i].find('"'));
-            bool comma = !trimmed.empty() && trimmed.back() == ',';
-            lines[i] = indent + "\"enableCommands\": true" + (comma ? "," : "");
-            foundEnable = true;
-        }
-        if (trimmed.find("\"preLaunchCommand\"") != std::string::npos) {
-            preLaunchLineIndex = i;
-            foundPreLaunch = true;
-        }
-    }
-
-    if (foundPreLaunch && preLaunchLineIndex >= 0) {
-        std::string trimmed = trim(lines[preLaunchLineIndex]);
-        std::string indent = lines[preLaunchLineIndex].substr(0, lines[preLaunchLineIndex].find('"'));
-        bool comma = !trimmed.empty() && trimmed.back() == ',';
-        std::string escaped = command;
-        // Escape backslashes and quotes for JSON
-        std::string out;
-        for (char c : escaped) {
-            if (c == '\\') out += "\\\\";
-            else if (c == '"') out += "\\\"";
-            else out += c;
-        }
-        lines[preLaunchLineIndex] = indent + "\"preLaunchCommand\": \"" + out + "\"" + (comma ? "," : "");
-    }
-
-    if ((!foundEnable || !foundPreLaunch) && launcherBraceLine >= 0) {
-        std::string indent = "        ";
-        if (launcherBraceLine + 1 < (int)lines.size()) {
-            auto& next = lines[launcherBraceLine + 1];
-            size_t sp = 0;
-            while (sp < next.size() && next[sp] == ' ') sp++;
-            if (sp > 0) indent = next.substr(0, sp);
-        }
-        int insertAt = launcherBraceLine + 1;
-        if (!foundPreLaunch && !command.empty()) {
-            std::string escaped;
-            for (char c : command) {
-                if (c == '\\') escaped += "\\\\";
-                else if (c == '"') escaped += "\\\"";
-                else escaped += c;
-            }
-            lines.insert(lines.begin() + insertAt, indent + "\"preLaunchCommand\": \"" + escaped + "\",");
-        }
-        if (!foundEnable && !command.empty())
-            lines.insert(lines.begin() + insertAt, indent + "\"enableCommands\": true,");
-    }
-
-    std::ofstream fout(jsonFile);
-    if (!fout.is_open()) return {false, "Cannot write " + jsonFile.string()};
-    for (auto& l : lines) fout << l << "\n";
-    return {true, ""};
 }
 
 /**
@@ -2418,11 +2370,20 @@ static void saveLauncherPaths() {
     }
 }
 
-static void killLaunchers() {
-    for (auto& name : {L"prismlauncher.exe", L"multimc.exe"}) {
-        std::wstring cmd = L"cmd /C taskkill /F /IM \"" + std::wstring(name) + L"\"";
-        execCommandCapture(cmd);
+static bool killLaunchers() {
+    auto launchers = ProcessUtils::findProcessesByImageNames({L"prismlauncher.exe", L"multimc.exe"});
+    for (const auto& launcher : launchers) {
+        HANDLE process = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, launcher.processId);
+        if (!process) {
+            if (GetLastError() == ERROR_INVALID_PARAMETER) continue; // Already exited.
+            return false;
+        }
+        bool exited = WaitForSingleObject(process, 0) == WAIT_OBJECT_0;
+        if (!exited && TerminateProcess(process, 1)) exited = WaitForSingleObject(process, 10000) == WAIT_OBJECT_0;
+        CloseHandle(process);
+        if (!exited) return false;
     }
+    return ProcessUtils::findProcessesByImageNames({L"prismlauncher.exe", L"multimc.exe"}).empty();
 }
 
 static void restartLaunchers() {
@@ -2478,10 +2439,10 @@ static bool runInstancePrelaunchTxt() {
         if (trimmed[0] == '#' || trimmed[0] == ';' || startsWith(trimmed, "//")) continue;
 
         std::cout << "[" << g_projectName << "] prelaunch.txt#" << lineNo << ": " << trimmed << std::endl;
-        std::wstring cmd = L"cmd /C " + toWide(trimmed);
+        std::wstring cmd = L"cmd.exe /D /S /C \"" + toWide(trimmed) + L"\"";
         STARTUPINFOW si{}; si.cb = sizeof(si);
         PROCESS_INFORMATION pi{};
-        if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, 0, nullptr,
+        if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr,
                            instanceRoot.wstring().c_str(), &si, &pi))
             return false;
         WaitForSingleObject(pi.hProcess, INFINITE);
@@ -2498,45 +2459,38 @@ static bool runInstancePrelaunchTxt() {
 }
 
 static bool runForwardedPreLaunchChain(int argc, wchar_t* argv[]) {
-    std::wstring escaped = getArgValue(argc, argv, FORWARDED_PRELAUNCH_CHAIN_ARG);
-    if (escaped.empty()) return runInstancePrelaunchTxt();
-
-    // Unescape
     std::wstring chain;
-    bool esc = false;
-    for (wchar_t c : escaped) {
-        if (esc) { chain += c; esc = false; }
-        else if (c == L'\\') esc = true;
-        else chain += c;
-    }
-
+    try {
+        if (hasArg(argc, argv, L"--run-prelaunch-chain-hex")) {
+            auto encoded = Prelaunch::unhex(toUtf8(getArgValue(argc, argv, L"--run-prelaunch-chain-hex")));
+            chain = toWide(Prelaunch::expandTokens(encoded, [&](const std::string& name, const std::string& flag) {
+                auto option = toWide(flag);
+                if (hasArg(argc, argv, option.c_str())) return toUtf8(getArgValue(argc, argv, option.c_str()));
+                throw std::runtime_error("Missing launcher value for $" + name);
+            }));
+        } else {
+            auto escaped = getArgValue(argc, argv, FORWARDED_PRELAUNCH_CHAIN_ARG);
+            if (escaped.empty()) return runInstancePrelaunchTxt();
+            chain = toWide(Prelaunch::forwarded("--run-prelaunch-chain \"" + toUtf8(escaped) + "\""));
+        }
+    } catch (const std::exception& e) { std::cerr << e.what() << std::endl; return false; }
     if (chain.empty()) return false;
-
-    std::cout << "[" << g_projectName << "] Executing forwarded pre-launch command(s)..." << std::endl;
-    std::wstring cmd = L"cmd /C " + chain;
+    std::wstring cmd = L"cmd.exe /D /S /C \"" + chain + L"\"";
     STARTUPINFOW si{}; si.cb = sizeof(si);
     PROCESS_INFORMATION pi{};
-    fs::path wd = resolveInstanceRootDir();
-    if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, wd.wstring().c_str(), &si, &pi))
-        return false;
+    auto wd = resolveInstanceRootDir();
+    if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, wd.c_str(), &si, &pi)) return false;
     WaitForSingleObject(pi.hProcess, INFINITE);
-    DWORD exit = 0;
-    GetExitCodeProcess(pi.hProcess, &exit);
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
-    if (exit != 0) return false;
-    return runInstancePrelaunchTxt();
+    DWORD code = 1; GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
+    return code == 0 && runInstancePrelaunchTxt();
 }
 
 // ============================================================================
 // Minecraft command line detection
 // ============================================================================
 static bool isLikelyMinecraftCommandLine(const std::wstring& cmdLine) {
-    if (cmdLine.empty()) return false;
-    std::wstring lower = toLowerW(cmdLine);
-    return lower.find(L"org.prismlauncher.entrypoint") != std::wstring::npos
-        || lower.find(L"org.multimc.entrypoint") != std::wstring::npos
-        || lower.find(L"mojangtricksinteldriversforperformance") != std::wstring::npos;
+    return LauncherSupport::isMinecraft(toUtf8(cmdLine));
 }
 
 // ============================================================================
@@ -2647,7 +2601,6 @@ static int runWatcherMode() {
     std::wstring targetCmdLine;
     std::set<DWORD> checkedPids;
     int pollCount = 0;
-    auto nextLeafRecheck = std::chrono::steady_clock::now();
 
     while (true) {
         while (javaProcessId == 0) {
@@ -2677,7 +2630,6 @@ static int runWatcherMode() {
                     logMsg("[" + g_projectName + "] Found matching process: PID " + std::to_string(proc.processId));
                     javaProcessId = proc.processId;
                     targetCmdLine = procCmd;
-                    nextLeafRecheck = std::chrono::steady_clock::now() + std::chrono::milliseconds(TARGET_LEAF_RECHECK_MS);
                     break;
                 } else if (!normCwd.empty()) {
                     checkedPids.insert(proc.processId);
@@ -2695,35 +2647,26 @@ static int runWatcherMode() {
             Sleep(POLL_INTERVAL_MS);
         }
 
-        // Wait for window
-        logMsg("[" + g_projectName + "] Waiting for window...");
-        std::wstring windowTitle = ProcessUtils::getVisibleTopLevelWindowTitle(javaProcessId);
-        if (!windowTitle.empty()) {
-            logMsg("[" + g_projectName + "] Window detected: '" + toUtf8(windowTitle) + "'");
+        // A Minecraft window can take minutes to appear on slow machines.
+        // Match the JAR watcher: recheck the leaf immediately before injection
+        // so a javaw shim that just spawned its JVM is never the target.
+        if (ProcessUtils::isJavaLeafProcess(javaProcessId)) {
+            logMsg("[" + g_projectName + "] Target identified; injecting without waiting for a window.");
             break;
         }
-
-        // Periodically recheck if target is still a leaf process
-        if (std::chrono::steady_clock::now() >= nextLeafRecheck) {
-            nextLeafRecheck = std::chrono::steady_clock::now() + std::chrono::milliseconds(TARGET_LEAF_RECHECK_MS);
-            if (!ProcessUtils::isJavaLeafProcess(javaProcessId)) {
-                logMsg("[" + g_projectName + "] Target PID " + std::to_string(javaProcessId) + " no longer a leaf; rescanning");
-                javaProcessId = 0;
-                checkedPids.clear();
-                continue;
-            }
-        }
+        logMsg("[" + g_projectName + "] Target PID " + std::to_string(javaProcessId) + " no longer a leaf; rescanning");
+        javaProcessId = 0;
+        targetCmdLine.clear();
+        checkedPids.clear();
 
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - startTime).count();
         if (elapsed > timeoutMs) {
-            logMsg("[" + g_projectName + "] Timeout waiting for window");
+            logMsg("[" + g_projectName + "] Timeout waiting for Java process");
             closeLogging();
             return 1;
         }
         Sleep(POLL_INTERVAL_MS);
     }
-
-    Sleep(500);
 
     // Inject DLLs
     int successCount = 0;
@@ -2818,7 +2761,7 @@ static int runLauncherMode(int argc, wchar_t* argv[]) {
     }
 
     PROCESS_INFORMATION pi{};
-    BOOL created = CreateProcessW(nullptr, watcherCmd.data(), nullptr, nullptr, TRUE, 0, nullptr,
+    BOOL created = CreateProcessW(nullptr, watcherCmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr,
                                   workingDir.wstring().c_str(), &si, &pi);
     if (hLog != INVALID_HANDLE_VALUE) CloseHandle(hLog);
 
@@ -2837,7 +2780,11 @@ static int runLauncherMode(int argc, wchar_t* argv[]) {
 /**
  * Install mode (double-click): detect instance config and install PreLaunchCommand.
  */
+#include "../../common/install_dialog.h"
+#include "../../common/native_launcher_install.h"
+
 static int runInstallMode() {
+    if (LauncherSupport::isMcsr(resolveInstanceRootDir())) { showMcsrManagedWarning(); return 1; }
     // Get exe directory and determine instance root
     fs::path exeDir = getExeDir();
     fs::path exePath = getExePath();
@@ -2899,30 +2846,20 @@ static int runInstallMode() {
     std::string prelaunchCmd = InstanceConfig::buildPreLaunchCommand(exeRelPath);
     std::string prelaunchCmdAtLauncher = InstanceConfig::buildPreLaunchCommand(exeRelPath, false);
 
+    if (auto result = installModrinth(instanceDir, stableExe)) return *result;
+
     // Look for instance.cfg (MultiMC/Prism) or instance.json (ATLauncher)
     fs::path cfgFile = instanceDir / L"instance.cfg";
     fs::path jsonFile = instanceDir / L"instance.json";
 
     if (fs::exists(cfgFile)) {
         InstanceConfig::saveLauncherPaths();
-        InstanceConfig::killLaunchers();
-        Sleep(500);
-        auto result = InstanceConfig::installPreLaunchCommandCfg(cfgFile, prelaunchCmd);
+        auto result = InstanceConfig::killLaunchers()
+            ? InstanceConfig::installPreLaunchCommandCfg(cfgFile, prelaunchCmd)
+            : InstanceConfig::InstallResult{false, "Could not close Prism/MultiMC. Close the launcher and retry."};
         if (result.success) {
             InstanceConfig::ensurePrelaunchTxtExists(instanceDir);
-            Ui::showDialog(
-                toWide(g_projectName + " v" + g_version + " — Installed"),
-                toWide(g_projectName + " has been configured for this instance.\n\n"
-                       "Instance: " + instanceDir.filename().string() + "\n"
-                       "Path: " + instanceDir.string() + "\n\n"
-                       "You can now launch Minecraft from your launcher."),
-                Ui::DialogTone::Success,
-                {{IDOK, L"Done", true}},
-                IDOK,
-                true,
-                L"Installation Complete",
-                760
-            );
+            showInstallSuccessDialogWithUninstall(cfgFile, instanceDir);
             InstanceConfig::restartLaunchers();
         } else {
             Ui::showDialog(
@@ -2937,24 +2874,13 @@ static int runInstallMode() {
             );
             InstanceConfig::restartLaunchers();
         }
+        return result.success ? 0 : 1;
     } else if (fs::exists(jsonFile)) {
-        std::string atlCmd = prelaunchCmdAtLauncher + " " + toUtf8(PRELAUNCH_ARG);
+        std::string atlCmd = prelaunchCmdAtLauncher;
         auto result = InstanceConfig::installPreLaunchCommandJson(jsonFile, atlCmd);
         if (result.success) {
             InstanceConfig::ensurePrelaunchTxtExists(instanceDir);
-            Ui::showDialog(
-                toWide(g_projectName + " v" + g_version + " — Installed"),
-                toWide(g_projectName + " has been configured for this instance.\n\n"
-                       "Instance: " + instanceDir.filename().string() + "\n"
-                       "Path: " + instanceDir.string() + "\n\n"
-                       "You can now launch Minecraft from your launcher."),
-                Ui::DialogTone::Success,
-                {{IDOK, L"Done", true}},
-                IDOK,
-                true,
-                L"Installation Complete",
-                760
-            );
+            showInstallSuccessDialogWithUninstall(jsonFile, instanceDir);
         } else {
             Ui::showDialog(
                 toWide(g_projectName + " — Error"),
@@ -2967,6 +2893,7 @@ static int runInstallMode() {
                 760
             );
         }
+        return result.success ? 0 : 1;
     } else {
         Ui::showDialog(
             toWide(g_projectName + " v" + g_version + " — Setup Required"),
@@ -2974,7 +2901,8 @@ static int runInstallMode() {
                    "1. Open your instance folder:\n"
                    "   - MultiMC: Right-click instance > Instance Folder\n"
                    "   - Prism: Right-click instance > Folder\n"
-                   "   - ATLauncher: Right-click instance > Open Folder\n\n"
+                   "   - ATLauncher: Right-click instance > Open Folder\n"
+                   "   - Modrinth: Instance options > Open folder\n\n"
                    "2. Drop this EXE into that folder.\n\n"
                    "3. Double-click this EXE in that folder to install."),
             Ui::DialogTone::Info,
@@ -2986,7 +2914,7 @@ static int runInstallMode() {
         );
     }
 
-    return 0;
+    return 1;
 }
 
 // ============================================================================

@@ -191,8 +191,7 @@ public class Main {
             if (hasArgument(args, PRELAUNCH_ARG) || (instId != null && !instId.isEmpty())) {
                 System.exit(runLauncherMode(args));
             } else {
-                showDoubleClickWarning();
-                System.exit(0);
+                System.exit(showDoubleClickWarning());
             }
         }
     }
@@ -201,10 +200,10 @@ public class Main {
      * Handle double-click: look for instance.cfg (MultiMC/Prism) or instance.json (ATLauncher)
      * and install PreLaunchCommand.
      */
-    private static void showDoubleClickWarning() {
+    private static int showDoubleClickWarning() {
         if (isMcsrLauncherInstance(resolveInstanceDirFromJar())) {
             showMcsrLauncherWarning();
-            return;
+            return 1;
         }
 
         // If the user double-clicks the JAR, start with a clean log for easier troubleshooting.
@@ -237,7 +236,7 @@ public class Main {
                             "Close MultiMC/Prism/any process using it and try again.\n\n" +
                             "Reason: " + (copyErr.getMessage() != null ? copyErr.getMessage() : copyErr.toString())
                         );
-                        return;
+                        return 1;
                     }
                 } else {
                     jarFilename = jarFile.getName();
@@ -251,7 +250,7 @@ public class Main {
         if (jarDir == null || stableJarForLauncher == null) {
             showErrorDialog("Could not resolve the current JAR path to create " + getStableSelfJarFileName() + ".\n\n" +
                 "Please run this from a JAR file (not from an IDE/classpath) and try again.");
-            return;
+            return 1;
         }
 
         // Prepare persistent DLL directory + Defender exclusion (may trigger UAC)
@@ -282,7 +281,7 @@ public class Main {
             } else {
                 showErrorDialog(result.error);
             }
-            return;
+            return result.success ? 0 : 1;
         }
 
         File instanceCfg = (instanceDir != null) ? new File(instanceDir, "instance.cfg") : null;
@@ -296,6 +295,7 @@ public class Main {
             } else {
                 showErrorDialog(result.error);
             }
+            return result.success ? 0 : 1;
         } else if (instanceJson != null && instanceJson.exists() && instanceJson.isFile()) {
             InstallResult result = installPreLaunchCommandJson(instanceJson, prelaunchCommandAtLauncher + " " + PRELAUNCH_ARG);
             if (result.success) {
@@ -304,8 +304,10 @@ public class Main {
             } else {
                 showErrorDialog(result.error);
             }
+            return result.success ? 0 : 1;
         } else {
             showNoInstanceCfgWarning(prelaunchCommand);
+            return 1;
         }
     }
 
@@ -2529,30 +2531,8 @@ public class Main {
     }
 
     private static ExecResult execCommandCapture(String[] command) {
-        try {
-            ProcessBuilder pb = new ProcessBuilder(command);
-            pb.redirectErrorStream(true);
-            Process p = pb.start();
-
-            String out;
-            InputStream in = p.getInputStream();
-            try {
-                ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                byte[] buf = new byte[4096];
-                int n;
-                while ((n = in.read(buf)) >= 0) {
-                    baos.write(buf, 0, n);
-                }
-                out = baos.toString();
-            } finally {
-                try { in.close(); } catch (Throwable ignored) {}
-            }
-
-            int code = p.waitFor();
-            return new ExecResult(code, out);
-        } catch (Throwable t) {
-            return new ExecResult(1, t.getClass().getName() + ": " + t.getMessage());
-        }
+        ProcessCapture.Result result = ProcessCapture.run(command, 60000);
+        return new ExecResult(result.exitCode, result.output);
     }
 
     private static ExecResult execElevatedAndWait(String file, String parameters, int timeoutMs) {
@@ -2803,8 +2783,10 @@ public class Main {
                 }
             }
 
+            // The launcher may have flushed settings while closing.
+            lines = Files.readAllLines(instanceCfg.toPath(), StandardCharsets.UTF_8);
             List<String> updated = InstanceCfg.update(lines, mergedCommand);
-            Files.write(instanceCfg.toPath(), updated, StandardCharsets.UTF_8);
+            ConfigFile.writeLines(instanceCfg.toPath(), updated);
 
             return new InstallResult(true, null);
             
@@ -2886,108 +2868,22 @@ public class Main {
      */
     private static InstallResult installPreLaunchCommandJson(File instanceJson, String command) {
         try {
-            // Read entire file
-            java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.FileReader(instanceJson));
-            List<String> lines = new ArrayList<String>();
-            String line;
-            boolean foundEnableCommands = false;
-            boolean foundPreLaunchCommand = false;
-            int launcherBraceLine = -1; // line index of the opening brace after "launcher"
-            int preLaunchLineIndex = -1;
-            String existingPreLaunch = null;
-            
-            while ((line = reader.readLine()) != null) {
-                lines.add(line);
-            }
-            reader.close();
-            
-            // Process lines - find and replace values
-            for (int i = 0; i < lines.size(); i++) {
-                String trimmed = lines.get(i).trim();
-                
-                // Track the launcher object opening
-                if (trimmed.startsWith("\"launcher\"") && trimmed.contains("{")) {
-                    launcherBraceLine = i;
-                } else if (launcherBraceLine >= 0 && !foundEnableCommands && trimmed.equals("\"launcher\": {")) {
-                    // Handle case where brace is on same line
-                    launcherBraceLine = i;
-                }
-                
-                // Replace enableCommands
-                if (trimmed.startsWith("\"enableCommands\"")) {
-                    String indent = lines.get(i).substring(0, lines.get(i).indexOf('"'));
-                    boolean needsComma = trimmed.endsWith(",");
-                    lines.set(i, indent + "\"enableCommands\": true" + (needsComma ? "," : ""));
-                    foundEnableCommands = true;
-                }
-                
-                // Track preLaunchCommand
-                if (trimmed.startsWith("\"preLaunchCommand\"")) {
-                    preLaunchLineIndex = i;
-                    existingPreLaunch = extractJsonStringValue(lines.get(i));
-                    foundPreLaunchCommand = true;
-                }
-            }
-
+            JsonObject root = InstanceJson.parse(new String(Files.readAllBytes(instanceJson.toPath()), StandardCharsets.UTF_8));
+            String existingPreLaunch = InstanceJson.preLaunchCommand(root);
             String mergedCommand = command;
             if (command != null && !command.trim().isEmpty()) {
                 MergeResult mergeResult = mergePreLaunchCommand(existingPreLaunch, command);
-                if (!mergeResult.proceed) {
-                    return new InstallResult(false, "Installation cancelled by user.");
-                }
+                if (!mergeResult.proceed) return new InstallResult(false, "Installation cancelled by user.");
                 mergedCommand = mergeResult.mergedCommand;
-            }
-
-            if (command != null && !command.trim().isEmpty()) {
                 InstallResult closeResult = closeLaunchersBeforePreLaunchUpdate();
-                if (!closeResult.success) {
-                    return closeResult;
-                }
-                if (!AtLauncherSupport.ensureClosedInteractive()) {
+                if (!closeResult.success) return closeResult;
+                if (!AtLauncherSupport.ensureClosedInteractive())
                     return new InstallResult(false, "Installation cancelled by user.");
-                }
+                // Closing a launcher may flush its settings. Preserve those final changes.
+                root = InstanceJson.parse(new String(Files.readAllBytes(instanceJson.toPath()), StandardCharsets.UTF_8));
             }
-
-            if (foundPreLaunchCommand && preLaunchLineIndex >= 0) {
-                String trimmed = lines.get(preLaunchLineIndex).trim();
-                String indent = lines.get(preLaunchLineIndex).substring(0, lines.get(preLaunchLineIndex).indexOf('"'));
-                boolean needsComma = trimmed.endsWith(",");
-                String escapedCommand = (mergedCommand != null ? mergedCommand : "").replace("\\", "\\\\").replace("\"", "\\\"");
-                lines.set(preLaunchLineIndex, indent + "\"preLaunchCommand\": \"" + escapedCommand + "\"" + (needsComma ? "," : ""));
-            }
-            
-            // If fields weren't found, insert them after the launcher opening brace
-            if ((!foundEnableCommands || !foundPreLaunchCommand) && launcherBraceLine >= 0) {
-                // Detect indentation from the line after the launcher brace
-                String indent = "        "; // default 8 spaces
-                if (launcherBraceLine + 1 < lines.size()) {
-                    String nextLine = lines.get(launcherBraceLine + 1);
-                    int spaces = 0;
-                    while (spaces < nextLine.length() && nextLine.charAt(spaces) == ' ') spaces++;
-                    if (spaces > 0) indent = nextLine.substring(0, spaces);
-                }
-                
-                String escapedCommand = command.replace("\\", "\\\\").replace("\"", "\\\"");
-                int insertAt = launcherBraceLine + 1;
-                
-                if (!foundPreLaunchCommand && mergedCommand != null && !mergedCommand.isEmpty()) {
-                    String escapedMerged = mergedCommand.replace("\\", "\\\\").replace("\"", "\\\"");
-                    lines.add(insertAt, indent + "\"preLaunchCommand\": \"" + escapedMerged + "\",");
-                }
-                if (!foundEnableCommands && command != null && !command.trim().isEmpty()) {
-                    lines.add(insertAt, indent + "\"enableCommands\": true,");
-                }
-            }
-            
-            // Write back the file
-            PrintWriter writer = new PrintWriter(new FileWriter(instanceJson));
-            for (int i = 0; i < lines.size(); i++) {
-                writer.println(lines.get(i));
-            }
-            writer.close();
-            
+            ConfigFile.write(instanceJson.toPath(), InstanceJson.update(root, mergedCommand));
             return new InstallResult(true, null);
-            
         } catch (Exception e) {
             return new InstallResult(false, e.getMessage());
         }
@@ -3270,15 +3166,7 @@ public class Main {
         try {
             // Do NOT use /T here: Prism/MultiMC child process trees can include running Minecraft java/javaw.
             // We only want to close the launcher executable itself.
-            ProcessBuilder pb = new ProcessBuilder("cmd", "/C", "taskkill /F /IM \"" + imageName + "\"");
-            pb.redirectErrorStream(true);
-            Process process = pb.start();
-            InputStream in = process.getInputStream();
-            while (in.read() != -1) {
-                // drain
-            }
-            in.close();
-            process.waitFor();
+            ProcessCapture.run(new String[]{"taskkill.exe", "/F", "/IM", imageName}, 10000);
         } catch (Exception e) {
             // Best-effort; presence check below determines whether this is acceptable.
         }
@@ -3307,16 +3195,12 @@ public class Main {
         }
 
         try {
-            ProcessBuilder pb = new ProcessBuilder(
-                "cmd",
-                "/C",
-                "tasklist /FI \"IMAGENAME eq " + imageName + "\" /FO CSV /NH"
-            );
-            pb.redirectErrorStream(true);
-
-            Process process = pb.start();
-            String output = new String(readAllBytes(process.getInputStream()), "UTF-8");
-            process.waitFor();
+            ProcessCapture.Result result = ProcessCapture.run(new String[]{
+                "tasklist.exe", "/FI", "IMAGENAME eq " + imageName, "/FO", "CSV", "/NH"
+            }, 10000);
+            // A failed query cannot establish that it is safe to overwrite settings.
+            if (result.exitCode != 0) return true;
+            String output = result.output;
 
             String imageLower = imageName.toLowerCase();
             String[] rows = output.split("\\r?\\n");

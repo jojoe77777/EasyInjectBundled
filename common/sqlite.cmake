@@ -1,0 +1,6 @@
+if(NOT TARGET easyinject_sqlite)
+    enable_language(C)
+    add_library(easyinject_sqlite STATIC "${CMAKE_CURRENT_LIST_DIR}/../third_party/sqlite/sqlite3.c")
+    target_compile_definitions(easyinject_sqlite PRIVATE SQLITE_THREADSAFE=1 SQLITE_OMIT_LOAD_EXTENSION)
+    set_target_properties(easyinject_sqlite PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()

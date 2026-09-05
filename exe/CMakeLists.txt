@@ -13,6 +13,8 @@ option(EASYINJECT_ENABLE_PACKAGING_TESTS
     "Register EasyInject packaging inspection tests"
     ${EASYINJECT_STANDALONE_DEFAULT})
 
+include("${CMAKE_CURRENT_SOURCE_DIR}/../common/sqlite.cmake")
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -138,7 +140,7 @@ function(configure_installer_target target output_name)
         target_link_options(${target} PRIVATE /Brepro)
     endif()
     target_link_libraries(${target} PRIVATE
-        Advapi32 Bcrypt Kernel32 Ntdll Psapi Shell32 Shlwapi User32 Winhttp Comctl32
+        easyinject_sqlite Advapi32 Bcrypt Kernel32 Ntdll Psapi Shell32 Shlwapi User32 Winhttp Comctl32
     )
 endfunction()
 

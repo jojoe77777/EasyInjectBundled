@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 project(EasyInjectExe LANGUAGES CXX RC)
 
+include("${CMAKE_CURRENT_SOURCE_DIR}/../common/sqlite.cmake")
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -9,7 +11,9 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 set(BRANDING_FILE "${CMAKE_CURRENT_SOURCE_DIR}/../branding.properties")
-set(LOGGER_DLL_FILE "${CMAKE_CURRENT_SOURCE_DIR}/../src/main/resources/dlls/liblogger_x64.dll")
+set(LOGGER_DLL_FILES
+    "${CMAKE_CURRENT_SOURCE_DIR}/../src/main/resources/dlls/liblogger_x64.dll"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../src/main/resources/dlls/liblogger_arm64.dll")
 set(BRANDING_RESOURCE_ID 101)
 set(DLL_INDEX_RESOURCE_ID 102)
 set(CUSTOM_DLL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../custom-dlls")
@@ -22,10 +26,19 @@ if(NOT EXISTS "${BRANDING_FILE}")
     message(FATAL_ERROR "branding.properties not found: ${BRANDING_FILE}")
 endif()
 
-if(NOT EXISTS "${LOGGER_DLL_FILE}")
-    message(FATAL_ERROR "liblogger_x64.dll not found: ${LOGGER_DLL_FILE}")
-endif()
+foreach(_logger IN LISTS LOGGER_DLL_FILES)
+    if(NOT EXISTS "${_logger}")
+        message(FATAL_ERROR "Required logger missing: ${_logger}")
+    endif()
+endforeach()
 
+file(GLOB CUSTOM_SUPPORT_FILES "${CUSTOM_DLL_DIR}/*.json")
+list(FILTER CUSTOM_DLL_FILES EXCLUDE REGEX "[/\\\\]Toolscreen[.]dll$")
+foreach(_arch x64 arm64)
+    if(NOT EXISTS "${CUSTOM_DLL_DIR}/Toolscreen_${_arch}.dll")
+        message(FATAL_ERROR "Missing Toolscreen_${_arch}.dll")
+    endif()
+endforeach()
 set(EMBED_DLL_FILES)
 set(_seen_dll_names)
 
@@ -41,9 +54,15 @@ macro(append_embed_dll file_path)
     endif()
 endmacro()
 
-append_embed_dll("${LOGGER_DLL_FILE}")
+foreach(_logger IN LISTS LOGGER_DLL_FILES)
+    append_embed_dll("${_logger}")
+endforeach()
 foreach(_dll IN LISTS CUSTOM_DLL_FILES)
     append_embed_dll("${_dll}")
+endforeach()
+
+foreach(_support IN LISTS CUSTOM_SUPPORT_FILES)
+    append_embed_dll("${_support}")
 endforeach()
 
 set(EMBED_DLL_INDEX_FILE "${CMAKE_CURRENT_BINARY_DIR}/embedded_dll_index.txt")
@@ -85,6 +104,7 @@ target_compile_definitions(EasyInjectExe PRIVATE
 )
 
 target_link_libraries(EasyInjectExe PRIVATE
+    easyinject_sqlite
     Advapi32
     Bcrypt
     Kernel32

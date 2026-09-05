@@ -19,6 +19,22 @@ inline std::string key(const std::string& line) {
     return equals == std::string::npos ? "" : normalized(text.substr(0, equals));
 }
 
+inline std::string preLaunchCommand(const std::vector<std::string>& lines) {
+    std::string section = "General", misplaced;
+    bool foundMisplaced = false;
+    for (const auto& line : lines) {
+        const auto text = normalized(line);
+        if (text.size() > 1 && text.front() == '[' && text.back() == ']') {
+            section = text.substr(1, text.size() - 2);
+        } else if (key(line) == "PreLaunchCommand") {
+            const auto value = text.substr(text.find('=') + 1);
+            if (section == "General") return value;
+            if (!foundMisplaced) { misplaced = value; foundMisplaced = true; }
+        }
+    }
+    return misplaced;
+}
+
 // Repair legacy entries in other sections as well as installing into General.
 inline std::vector<std::string> update(const std::vector<std::string>& lines, const std::string& command) {
     std::vector<std::string> updated;
