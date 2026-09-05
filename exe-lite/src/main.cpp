@@ -46,6 +46,8 @@
 #include <thread>
 #include <vector>
 
+#include "../../common/instance_cfg.h"
+
 namespace fs = std::filesystem;
 
 // Link manifest for ComCtl32 v6 (visual styles / TaskDialog)
@@ -2288,36 +2290,13 @@ static InstallResult installPreLaunchCommandCfg(const fs::path& cfgFile, const s
 
     std::vector<std::string> lines;
     std::string line;
-    bool foundPreLaunch = false, foundOverride = false;
-
     while (std::getline(fin, line)) {
         if (!line.empty() && line.back() == '\r') line.pop_back();
         lines.push_back(line);
-        if (startsWith(line, "PreLaunchCommand=")) foundPreLaunch = true;
-        if (startsWith(line, "OverrideCommands=")) foundOverride = true;
     }
     fin.close();
 
-    // Update or add lines
-    std::vector<std::string> updated;
-    bool wrotePreLaunch = false, wroteOverride = false;
-    for (auto& l : lines) {
-        if (startsWith(l, "PreLaunchCommand=")) {
-            if (!wrotePreLaunch) {
-                updated.push_back("PreLaunchCommand=" + command);
-                wrotePreLaunch = true;
-            }
-        } else if (startsWith(l, "OverrideCommands=")) {
-            updated.push_back("OverrideCommands=true");
-            wroteOverride = true;
-        } else {
-            updated.push_back(l);
-        }
-    }
-    if (!wrotePreLaunch && !command.empty())
-        updated.push_back("PreLaunchCommand=" + command);
-    if (!wroteOverride && !command.empty())
-        updated.push_back("OverrideCommands=true");
+    const auto updated = InstanceCfg::update(lines, command);
 
     std::ofstream fout(cfgFile);
     if (!fout.is_open()) return {false, "Cannot write " + cfgFile.string()};

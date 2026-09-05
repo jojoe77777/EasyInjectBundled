@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.20)
+project(EasyInjectConfigTests LANGUAGES CXX)
+include(CTest)
+add_executable(easyinject_instance_cfg_tests instance_cfg_test.cpp)
+target_compile_features(easyinject_instance_cfg_tests PRIVATE cxx_std_17)
+add_test(NAME instance_cfg_sections COMMAND easyinject_instance_cfg_tests)

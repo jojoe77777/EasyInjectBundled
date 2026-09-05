@@ -41,6 +41,7 @@ import java.util.regex.Pattern;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
@@ -2783,27 +2784,8 @@ public class Main {
      */
     private static InstallResult installPreLaunchCommand(File instanceCfg, String command) {
         try {
-            // Read entire file
-            java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.FileReader(instanceCfg));
-            List<String> lines = new ArrayList<String>();
-            String line;
-            boolean foundPreLaunch = false;
-            boolean foundOverrideCommands = false;
-            String existingPreLaunch = null;
-            
-            while ((line = reader.readLine()) != null) {
-                if (line.startsWith("PreLaunchCommand=") && !foundPreLaunch) {
-                    existingPreLaunch = line.substring("PreLaunchCommand=".length());
-                    lines.add(line);
-                    foundPreLaunch = true;
-                } else if (line.startsWith("OverrideCommands=")) {
-                    lines.add(line);
-                    foundOverrideCommands = true;
-                } else {
-                    lines.add(line);
-                }
-            }
-            reader.close();
+            List<String> lines = Files.readAllLines(instanceCfg.toPath(), StandardCharsets.UTF_8);
+            String existingPreLaunch = InstanceCfg.preLaunchCommand(lines);
 
             String mergedCommand = command;
             if (command != null && !command.trim().isEmpty()) {
@@ -2821,42 +2803,9 @@ public class Main {
                 }
             }
 
-            // Rewrite with updated values (while avoiding duplicate PreLaunchCommand entries)
-            List<String> updated = new ArrayList<String>();
-            boolean wrotePreLaunch = false;
-            boolean wroteOverrideCommands = false;
+            List<String> updated = InstanceCfg.update(lines, mergedCommand);
+            Files.write(instanceCfg.toPath(), updated, StandardCharsets.UTF_8);
 
-            for (String original : lines) {
-                if (original.startsWith("PreLaunchCommand=")) {
-                    if (!wrotePreLaunch) {
-                        updated.add("PreLaunchCommand=" + (mergedCommand != null ? mergedCommand : ""));
-                        wrotePreLaunch = true;
-                    }
-                } else if (original.startsWith("OverrideCommands=")) {
-                    updated.add("OverrideCommands=true");
-                    wroteOverrideCommands = true;
-                } else {
-                    updated.add(original);
-                }
-            }
-            
-            // If PreLaunchCommand wasn't found, add it only when non-empty command is requested
-            if (!wrotePreLaunch && mergedCommand != null && (!mergedCommand.isEmpty() || command != null)) {
-                updated.add("PreLaunchCommand=" + mergedCommand);
-            }
-            
-            // If OverrideCommands wasn't found, add it
-            if (!wroteOverrideCommands && (command != null && !command.trim().isEmpty())) {
-                updated.add("OverrideCommands=true");
-            }
-            
-            // Write back the file
-            PrintWriter writer = new PrintWriter(new FileWriter(instanceCfg));
-            for (String l : updated) {
-                writer.println(l);
-            }
-            writer.close();
-            
             return new InstallResult(true, null);
             
         } catch (Exception e) {

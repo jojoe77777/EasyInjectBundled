@@ -153,6 +153,9 @@ if(EASYINJECT_BUILD_REDUCED_AV_HEURISTICS)
 endif()
 
 include(CTest)
+if(BUILD_TESTING)
+    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../tests" "instance-cfg-tests")
+endif()
 if(BUILD_TESTING AND EASYINJECT_ENABLE_PACKAGING_TESTS AND TARGET installer_exe_reduced_av_heuristics)
     add_test(NAME reduced_av_heuristics_artifact_inspection
         COMMAND powershell -NoProfile -ExecutionPolicy RemoteSigned -File
