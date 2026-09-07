@@ -82,6 +82,7 @@ public class Main {
     private static final String LOG_FILE = "injector.log";
     private static final int POLL_INTERVAL_MS = 100;
     private static final int TIMEOUT_SECONDS = 120;
+    private static final boolean REQUIRE_WINDOW_BEFORE_INJECTION = true; // Temporary: false restores early injection.
 
     static String payloadArchitectureFor(String architecture) {
         String arch = architecture == null ? "" : architecture.toLowerCase(java.util.Locale.ROOT);
@@ -4633,7 +4634,7 @@ public class Main {
 
             int pollCount = 0;
 
-            while (javaProcessId == 0) {
+            while (true) {
                 List<ProcessUtils.ProcessInfo> currentProcs = ProcessUtils.findJavaLeafProcesses();
                 log("[" + PROJECT_NAME + "] Poll #" + (pollCount + 1) + ": found " + currentProcs.size() + " Java leaf process(es)");
 
@@ -4713,18 +4714,17 @@ public class Main {
                 }
 
                 if (javaProcessId != 0) {
-                    // The first snapshot can catch a javaw.exe shim just
-                    // before it creates its child. Take a fresh snapshot
-                    // immediately before injection; this avoids the former
-                    // window wait without ever attaching to a parent wrapper.
+                    // Recheck the leaf while waiting for its window.
                     if (ProcessUtils.isJavaLeafProcess(javaProcessId)) {
-                        break;
+                        if (!REQUIRE_WINDOW_BEFORE_INJECTION || ProcessUtils.processHasWindow(javaProcessId)) {
+                            break;
+                        }
+                    } else {
+                        log("[" + PROJECT_NAME + "] Target no longer a leaf; rescanning");
+                        javaProcessId = 0;
+                        targetProcessCmdLine = "";
+                        checkedPids.clear();
                     }
-                    log("[" + PROJECT_NAME + "] PID " + javaProcessId +
-                        " spawned a child before injection; rescanning for the real JVM");
-                    javaProcessId = 0;
-                    targetProcessCmdLine = "";
-                    checkedPids.clear();
                 }
 
                 if (System.currentTimeMillis() - startTime > timeoutMs) {
@@ -4737,7 +4737,7 @@ public class Main {
                 sleep(POLL_INTERVAL_MS);
             }
 
-            log("[" + PROJECT_NAME + "] Target identified; injecting immediately without waiting for a window.");
+            log("[" + PROJECT_NAME + "] Target ready; injecting DLLs.");
             if (targetProcessCmdLine != null && !targetProcessCmdLine.trim().isEmpty()) {
                 log("[" + PROJECT_NAME + "] Target command line: " + targetProcessCmdLine);
             }
