@@ -47,6 +47,5 @@ payload logs separately; an installer success dialog or successful DLL injection
 alone does not establish that the payload initialized or rendered correctly.
 
 Include a cold Minecraft launch that takes longer than 60 seconds to create its
-window. With REQUIRE_WINDOW_BEFORE_INJECTION enabled, watchers must wait for a window
-owned by the matching leaf JVM before injection, within the existing 120-second
-timeout. Set the hardcoded boolean to false to restore early injection.
+window. Both native watchers must identify the matching leaf JVM and inject
+before a window exists, rather than time out waiting for rendering to start.

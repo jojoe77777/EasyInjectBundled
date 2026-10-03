@@ -101,7 +101,6 @@ static const int BRANDING_RESOURCE_ID = 101;
 static const int DLL_INDEX_RESOURCE_ID = 102;
 static const int POLL_INTERVAL_MS       = 500;
 static const int TIMEOUT_SECONDS        = 120;
-static constexpr bool REQUIRE_WINDOW_BEFORE_INJECTION = true; // Temporary: false restores early injection.
 
 // ============================================================================
 // Branding globals
@@ -3055,18 +3054,17 @@ static int runWatcherMode() {
             Sleep(POLL_INTERVAL_MS);
         }
 
-        // Recheck the leaf while waiting for its window.
+        // A Minecraft window can take minutes to appear on slow machines.
+        // Match the JAR watcher: recheck the leaf immediately before injection
+        // so a javaw shim that just spawned its JVM is never the target.
         if (ProcessUtils::isJavaLeafProcess(javaProcessId)) {
-            if (!REQUIRE_WINDOW_BEFORE_INJECTION || ProcessUtils::processHasWindow(javaProcessId)) {
-                logMsg("[" + g_projectName + "] Target ready; injecting DLLs.");
-                break;
-            }
-        } else {
-            logMsg("[" + g_projectName + "] Target no longer a leaf; rescanning");
-            javaProcessId = 0;
-            targetCmdLine.clear();
-            checkedPids.clear();
+            logMsg("[" + g_projectName + "] Target identified; injecting without waiting for a window.");
+            break;
         }
+        logMsg("[" + g_projectName + "] Target PID " + std::to_string(javaProcessId) + " no longer a leaf; rescanning");
+        javaProcessId = 0;
+        targetCmdLine.clear();
+        checkedPids.clear();
 
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - startTime).count();
         if (elapsed > timeoutMs) {
