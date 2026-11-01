@@ -169,7 +169,6 @@
                                         <exclude>org/sqlite/native/Linux/**</exclude>
                                         <exclude>org/sqlite/native/Mac/**</exclude>
                                         <exclude>org/sqlite/native/Windows/armv7/**</exclude>
-                                        <exclude>org/sqlite/native/Windows/x86/**</exclude>
                                     </excludes>
                                 </filter>
                             </filters>

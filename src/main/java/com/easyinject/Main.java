@@ -273,7 +273,14 @@ public class Main {
         String prelaunchCommand = "\\\"$INST_JAVA\\\" -jar \\\"$INST_DIR/" + jarRelativePath + "\\\"";
         String prelaunchCommandAtLauncher = "\"$INST_JAVA\" -jar \"$INST_DIR/" + jarRelativePath + "\"";
 
-        ModrinthInstance modrinth = detectModrinthInstance(stableJarForLauncher.getParentFile());
+        ModrinthDetection modrinthDetection = detectModrinthInstance(stableJarForLauncher.getParentFile());
+        if (modrinthDetection.error != null) {
+            // Same as the native installer: a database we could not read means we cannot tell whether this
+            // is a Modrinth instance, so report the error instead of falling through to "no instance found".
+            showErrorDialog("Modrinth integration failed:\n" + modrinthDetection.error);
+            return 1;
+        }
+        ModrinthInstance modrinth = modrinthDetection.instance;
         if (modrinth != null) {
             InstallResult result = installForModrinthProfile(stableJarForLauncher, modrinth);
             if (result.success) {
@@ -320,6 +327,16 @@ public class Main {
         }
     }
 
+    /** The detected instance, or the last database error when no candidate database held the profile. */
+    private static class ModrinthDetection {
+        final ModrinthInstance instance;
+        final String error;
+        ModrinthDetection(ModrinthInstance instance, String error) {
+            this.instance = instance;
+            this.error = error;
+        }
+    }
+
     /**
      * The current Modrinth database stores launch overrides as JSON, keyed by
      * instance id. Keep the parsed object so changing the pre-launch hook does
@@ -344,22 +361,30 @@ public class Main {
         InstallResult run(java.sql.Connection conn) throws java.sql.SQLException;
     }
 
-    private static ModrinthInstance detectModrinthInstance(File jarDir) {
-        if (jarDir == null) return null;
+    private static ModrinthDetection detectModrinthInstance(File jarDir) {
+        ModrinthDetection none = new ModrinthDetection(null, null);
+        if (jarDir == null) return none;
         File dir = canonicalize(jarDir);
         if (isMinecraftDir(dir)) dir = dir.getParentFile();
-        if (dir == null) return null;
+        if (dir == null) return none;
 
         File profilesDir = dir.getParentFile();
-        if (profilesDir == null || !profilesDir.getName().equals("profiles")) return null;
+        if (profilesDir == null || !profilesDir.getName().equals("profiles")) return none;
 
         String profilePath = dir.getName();
+        String error = null;
         for (File dbFile : findModrinthDatabaseCandidates(profilesDir)) {
-            if (modrinthDatabaseContainsProfile(dbFile, profilePath)) {
-                return new ModrinthInstance(profilePath, dbFile);
+            try {
+                if (modrinthDatabaseContainsProfile(dbFile, profilePath)) {
+                    return new ModrinthDetection(new ModrinthInstance(profilePath, dbFile), null);
+                }
+            } catch (Throwable t) {
+                // UnsatisfiedLinkError from the SQLite natives is an Error, not an Exception.
+                error = "Cannot read Modrinth database " + dbFile.getAbsolutePath() + ": " + describeThrowable(t);
+                log("[" + PROJECT_NAME + "] " + error);
             }
         }
-        return null;
+        return new ModrinthDetection(null, error);
     }
 
     /**
@@ -391,8 +416,8 @@ public class Main {
         candidates.put(canonical.getAbsolutePath().toLowerCase(), canonical);
     }
 
-    private static boolean modrinthDatabaseContainsProfile(File dbFile, String profilePath) {
-        try (java.sql.Connection conn = openModrinthDb(dbFile)) {
+    private static boolean modrinthDatabaseContainsProfile(File dbFile, String profilePath) throws java.sql.SQLException {
+        try (java.sql.Connection conn = openModrinthDb(dbFile, false)) {
             if (modrinthUsesCurrentSchema(conn)) {
                 try (java.sql.PreparedStatement ps = conn.prepareStatement(
                         "SELECT 1 FROM instances WHERE path = ?")) {
@@ -409,9 +434,12 @@ public class Main {
                     return rs.next();
                 }
             }
-        } catch (Exception ignored) {
-            return false;
         }
+    }
+
+    private static String describeThrowable(Throwable t) {
+        String message = t.getMessage();
+        return message == null || message.trim().isEmpty() ? t.getClass().getName() : t.getClass().getSimpleName() + ": " + message;
     }
 
     private static File canonicalize(File f) {
@@ -472,19 +500,36 @@ public class Main {
         if (!modrinth.dbFile.exists()) {
             return new InstallResult(false, "Modrinth App database not found at: " + modrinth.dbFile.getAbsolutePath());
         }
-        try (java.sql.Connection conn = openModrinthDb(modrinth.dbFile)) {
+        try (java.sql.Connection conn = openModrinthDb(modrinth.dbFile, true)) {
             return op.run(conn);
-        } catch (Exception e) {
-            return new InstallResult(false, "Modrinth database error: " + e.getMessage());
+        } catch (Throwable e) {
+            return new InstallResult(false, "Modrinth database error: " + describeThrowable(e));
         }
     }
 
-    private static java.sql.Connection openModrinthDb(File dbFile) throws java.sql.SQLException {
-        java.sql.Connection conn = java.sql.DriverManager.getConnection("jdbc:sqlite:" + dbFile.getAbsolutePath());
-        try (java.sql.Statement statement = conn.createStatement()) {
-            statement.execute("PRAGMA busy_timeout = 30000");
+    // Never create a database: a missing file means a wrong guess, not an empty Modrinth install.
+    private static java.sql.Connection openModrinthDb(File dbFile, boolean writable) throws java.sql.SQLException {
+        useSqliteTempDir();
+        org.sqlite.SQLiteConfig config = new org.sqlite.SQLiteConfig();
+        if (writable) {
+            config.resetOpenMode(org.sqlite.SQLiteOpenMode.CREATE);
+        } else {
+            config.setReadOnly(true);
         }
-        return conn;
+        config.setBusyTimeout(30000);
+        return config.createConnection("jdbc:sqlite:" + dbFile.getAbsolutePath());
+    }
+
+    // sqlite-jdbc extracts its native library into org.sqlite.tmpdir (java.io.tmpdir by default). Temp
+    // cleaners and antivirus quarantine break that copy, so keep it in Toolscreen's own folder.
+    private static void useSqliteTempDir() {
+        if (System.getProperty("org.sqlite.tmpdir") != null) return;
+        File dllDir = getPreferredPersistentDllDir();
+        File base = dllDir.getParentFile() != null ? dllDir.getParentFile() : dllDir;
+        File sqliteDir = new File(base, "sqlite");
+        if (sqliteDir.isDirectory() || sqliteDir.mkdirs()) {
+            System.setProperty("org.sqlite.tmpdir", sqliteDir.getAbsolutePath());
+        }
     }
 
     private static boolean modrinthUsesCurrentSchema(java.sql.Connection conn) throws java.sql.SQLException {
