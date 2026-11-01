@@ -397,8 +397,10 @@ public class Main {
         File configDir = profilesDir.getParentFile();
         addModrinthDatabaseCandidate(candidates, configDir == null ? null : new File(configDir, "app.db"));
         addModrinthDatabaseCandidate(candidates, databaseInDirectory(System.getenv("THESEUS_CONFIG_DIR")));
-        addModrinthDatabaseCandidate(candidates, databaseInDirectory(System.getenv("APPDATA"), "com.modrinth.theseus"));
-        addModrinthDatabaseCandidate(candidates, databaseInDirectory(System.getenv("LOCALAPPDATA"), "com.modrinth.theseus"));
+        for (String root : new String[] { System.getenv("APPDATA"), System.getenv("LOCALAPPDATA") }) {
+            addModrinthDatabaseCandidate(candidates, databaseInDirectory(root, "com.modrinth.theseus"));
+            addModrinthDatabaseCandidate(candidates, databaseInDirectory(root, "ModrinthApp"));
+        }
         return new ArrayList<File>(candidates.values());
     }
 
@@ -5077,11 +5079,25 @@ public class Main {
         }
 
         String lower = commandLine.toLowerCase();
-
-        return lower.contains("org.prismlauncher.entrypoint")
-            || lower.contains("org.multimc.entrypoint")
-            || lower.contains("mojangtricksinteldriversforperformance");
+        for (String entry : MINECRAFT_COMMAND_LINE_MARKERS) {
+            if (lower.contains(entry)) return true;
+        }
+        return false;
     }
+
+    // Keep in step with LauncherSupport::isMinecraft in common/launcher_support.h.
+    private static final String[] MINECRAFT_COMMAND_LINE_MARKERS = {
+        "org.prismlauncher.entrypoint",
+        "org.multimc.entrypoint",
+        "mojangtricksinteldriversforperformance",
+        "net.minecraft.client.main.main",
+        "net.fabricmc.loader.impl.launch.knot.knotclient",
+        "net.fabricmc.loader.launch.knot.knotclient",
+        "org.quiltmc.loader.impl.launch.knot.knotclient",
+        "net.minecraft.launchwrapper.launch",
+        "cpw.mods.modlauncher.launcher",
+        "cpw.mods.bootstraplauncher.bootstraplauncher",
+    };
 
     private static void sleep(int ms) {
         try {
