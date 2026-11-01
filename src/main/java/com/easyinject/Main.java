@@ -472,10 +472,13 @@ public class Main {
             .replace("\r", "");
     }
 
-    // javaw.exe avoids a console window. Modrinth shells the hook out directly, unlike
-    // Prism/MultiMC which spawn it via CreateProcess with the console suppressed.
-    private static String modrinthWrapperCommand(File stableJar) {
-        return "\"" + getJavawExePath() + "\" -jar \"" + stableJar.getAbsolutePath() + "\" " + PRELAUNCH_ARG;
+    // Current Modrinth App versions expand $INST_JAVA in hooks to the Java this instance launches with, so
+    // the hook keeps working when the installer's own Java is updated, removed or 32-bit. Databases with
+    // the legacy profiles table belong to app versions without expansion, so they keep the installer's
+    // javaw.exe, which avoids a console window.
+    private static String modrinthWrapperCommand(File stableJar, boolean currentSchema) {
+        String java = currentSchema ? "$INST_JAVA" : getJavawExePath();
+        return "\"" + java + "\" -jar \"" + stableJar.getAbsolutePath() + "\" " + PRELAUNCH_ARG;
     }
 
     private static InstallResult installForModrinthProfile(File stableJar, ModrinthInstance modrinth) {
@@ -486,7 +489,7 @@ public class Main {
             if (existing != null && !existing.trim().isEmpty() && !isOurModrinthHook(existing)) {
                 return foreignHookError(modrinth, existing);
             }
-            return writeModrinthHook(conn, modrinth.profilePath, hook, modrinthWrapperCommand(stableJar));
+            return writeModrinthHook(conn, modrinth.profilePath, hook, modrinthWrapperCommand(stableJar, hook.currentSchema));
         });
     }
 
