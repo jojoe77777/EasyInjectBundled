@@ -76,18 +76,6 @@ static const wchar_t* WATCHER_ARG        = L"--watcher";
 static const wchar_t* INFO_ARG           = L"--info";
 static const wchar_t* PRELAUNCH_ARG      = L"--prelaunch";
 static const wchar_t* FORWARDED_PRELAUNCH_CHAIN_ARG = L"--run-prelaunch-chain";
-static std::wstring detectNativePayloadArchitecture() {
-#if defined(_M_ARM64)
-    return L"arm64";
-#else
-    // The injected DLL must match this injector process. In particular, an
-    // x64 build running under emulation on ARM64 Windows still needs x64 DLLs.
-    return L"x64";
-#endif
-}
-
-static const std::wstring PAYLOAD_ARCH = detectNativePayloadArchitecture();
-static const std::wstring LOGGER_DLL_NAME = L"liblogger_" + PAYLOAD_ARCH + L".dll";
 static const wchar_t* LOG_FILE_NAME     = L"injector.log";
 static const int BRANDING_RESOURCE_ID = 101;
 static const int DLL_INDEX_RESOURCE_ID = 102;
@@ -1636,6 +1624,144 @@ static std::string getErrorMessage(DWORD err) {
     }
 }
 
+static std::string toHex(unsigned value) {
+    char buffer[16];
+    snprintf(buffer, sizeof(buffer), "%04X", value);
+    return buffer;
+}
+
+// The injected DLLs and the LoadLibraryW start address must match the
+// architecture the game's JVM runs as. On ARM64 Windows that can differ from
+// this installer: the x64 build runs under emulation beside a native ARM64 JVM.
+static USHORT currentProcessMachine() {
+#if defined(_M_ARM64)
+    return IMAGE_FILE_MACHINE_ARM64;
+#else
+    return IMAGE_FILE_MACHINE_AMD64;
+#endif
+}
+
+template <typename T>
+static bool readRemote(HANDLE hProcess, ULONG_PTR address, T& out) {
+    SIZE_T bytesRead = 0;
+    return ReadProcessMemory(hProcess, reinterpret_cast<LPCVOID>(address), &out, sizeof(T), &bytesRead)
+        && bytesRead == sizeof(T);
+}
+
+static USHORT readRemoteImageMachine(HANDLE hProcess) {
+    auto peb = ProcessUtils::getPebInfo(hProcess);
+    if (peb.pebAddr == 0 || peb.isWow64) return 0;
+    ULONG_PTR imageBase = 0;
+    IMAGE_DOS_HEADER dos{};
+    IMAGE_FILE_HEADER file{};
+    if (!readRemote(hProcess, peb.pebAddr + 0x10, imageBase) || imageBase == 0) return 0; // PEB64.ImageBaseAddress
+    if (!readRemote(hProcess, imageBase, dos) || dos.e_magic != IMAGE_DOS_SIGNATURE) return 0;
+    if (!readRemote(hProcess, imageBase + dos.e_lfanew + sizeof(DWORD), file)) return 0;
+    return file.Machine;
+}
+
+/**
+ * Machine type the process executes as: AMD64 for an emulated x64 JVM on
+ * ARM64 Windows, ARM64 for a native one. Returns 0 when it cannot be read.
+ */
+static USHORT getProcessMachine(HANDLE hProcess) {
+    PROCESS_MACHINE_INFORMATION info{};
+    if (GetProcessInformation(hProcess, ProcessMachineTypeInfo, &info, sizeof(info)))
+        return info.ProcessMachine;
+    // Windows 10 has no ProcessMachineTypeInfo, and it runs no 64-bit process
+    // under emulation, so the executable's own machine type is exact there.
+    return readRemoteImageMachine(hProcess);
+}
+
+/** "x64" or "arm64": the DLL architecture the process can load. */
+static std::string getPayloadArchitecture(DWORD processId) {
+    USHORT machine = 0;
+    if (HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, processId)) {
+        machine = getProcessMachine(hProcess);
+        CloseHandle(hProcess);
+    }
+    if (machine == 0) machine = currentProcessMachine();
+    return machine == IMAGE_FILE_MACHINE_ARM64 ? "arm64" : "x64";
+}
+
+static ULONG_PTR findRemoteModule(HANDLE hProcess, const std::wstring& moduleName) {
+    auto peb = ProcessUtils::getPebInfo(hProcess);
+    if (peb.pebAddr == 0 || peb.isWow64) return 0;
+    ULONG_PTR ldr = 0;
+    if (!readRemote(hProcess, peb.pebAddr + 0x18, ldr) || ldr == 0) return 0; // PEB64.Ldr
+    const ULONG_PTR listHead = ldr + 0x10; // PEB_LDR_DATA64.InLoadOrderModuleList
+    ULONG_PTR entry = 0;
+    if (!readRemote(hProcess, listHead, entry)) return 0;
+    for (int i = 0; entry != 0 && entry != listHead && i < 4096; ++i) {
+        // LDR_DATA_TABLE_ENTRY64: InLoadOrderLinks at 0x00, DllBase at 0x30, BaseDllName at 0x58.
+        if (iequalsW(ProcessUtils::readUnicodeString64(hProcess, entry + 0x58), moduleName)) {
+            ULONG_PTR base = 0;
+            return readRemote(hProcess, entry + 0x30, base) ? base : 0;
+        }
+        if (!readRemote(hProcess, entry, entry)) return 0;
+    }
+    return 0;
+}
+
+static std::string readRemoteCString(HANDLE hProcess, ULONG_PTR address, size_t maxLength) {
+    std::string out;
+    char c = 0;
+    while (out.size() < maxLength && readRemote(hProcess, address + out.size(), c) && c != '\0')
+        out.push_back(c);
+    return out;
+}
+
+/**
+ * Resolve an export from the module's in-memory headers in the target, which
+ * hold that process's own view of an ARM64X system DLL.
+ */
+static ULONG_PTR findRemoteExport(HANDLE hProcess, ULONG_PTR moduleBase, const std::string& exportName, int forwardDepth = 0) {
+    IMAGE_DOS_HEADER dos{};
+    IMAGE_NT_HEADERS64 nt{};
+    IMAGE_EXPORT_DIRECTORY exports{};
+    if (!readRemote(hProcess, moduleBase, dos) || dos.e_magic != IMAGE_DOS_SIGNATURE) return 0;
+    if (!readRemote(hProcess, moduleBase + dos.e_lfanew, nt) || nt.Signature != IMAGE_NT_SIGNATURE
+        || nt.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) return 0;
+    const IMAGE_DATA_DIRECTORY dir = nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+    if (dir.VirtualAddress == 0 || !readRemote(hProcess, moduleBase + dir.VirtualAddress, exports)) return 0;
+
+    // Export names are sorted, so a binary search reads about a dozen of them.
+    DWORD low = 0;
+    DWORD high = exports.NumberOfNames;
+    while (low < high) {
+        const DWORD mid = low + (high - low) / 2;
+        DWORD nameRva = 0;
+        if (!readRemote(hProcess, moduleBase + exports.AddressOfNames + mid * sizeof(DWORD), nameRva)) return 0;
+        const int cmp = readRemoteCString(hProcess, moduleBase + nameRva, exportName.size() + 1).compare(exportName);
+        if (cmp < 0) { low = mid + 1; continue; }
+        if (cmp > 0) { high = mid; continue; }
+
+        WORD ordinal = 0;
+        DWORD functionRva = 0;
+        if (!readRemote(hProcess, moduleBase + exports.AddressOfNameOrdinals + mid * sizeof(WORD), ordinal)) return 0;
+        if (!readRemote(hProcess, moduleBase + exports.AddressOfFunctions + ordinal * sizeof(DWORD), functionRva)) return 0;
+        if (functionRva < dir.VirtualAddress || functionRva >= dir.VirtualAddress + dir.Size)
+            return functionRva ? moduleBase + functionRva : 0;
+
+        // Forwarded export: "MODULE.Function".
+        const std::string forwarder = readRemoteCString(hProcess, moduleBase + functionRva, 256);
+        const size_t dot = forwarder.rfind('.');
+        if (forwardDepth >= 2 || dot == std::string::npos || dot + 1 >= forwarder.size() || forwarder[dot + 1] == '#') return 0;
+        const ULONG_PTR forwardedBase = findRemoteModule(hProcess, toWide(forwarder.substr(0, dot)) + L".dll");
+        return forwardedBase ? findRemoteExport(hProcess, forwardedBase, forwarder.substr(dot + 1), forwardDepth + 1) : 0;
+    }
+    return 0;
+}
+
+static ULONG_PTR findRemoteLoadLibraryW(HANDLE hProcess) {
+    for (const wchar_t* moduleName : {L"kernel32.dll", L"kernelbase.dll"}) {
+        const ULONG_PTR base = findRemoteModule(hProcess, moduleName);
+        const ULONG_PTR address = base ? findRemoteExport(hProcess, base, "LoadLibraryW") : 0;
+        if (address) return address;
+    }
+    return 0;
+}
+
 static InjectionResult injectDll(DWORD processId, const fs::path& dllPath) {
     if (!fs::exists(dllPath))
         return {false, "DLL file does not exist: " + dllPath.string(), 0};
@@ -1667,16 +1793,28 @@ static InjectionResult injectDll(DWORD processId, const fs::path& dllPath) {
             break;
         }
 
-        // Get LoadLibraryW address
-        HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
-        if (!hKernel32) {
-            result = {false, "GetModuleHandle(kernel32.dll) failed", GetLastError()};
-            break;
-        }
-        FARPROC loadLibAddr = GetProcAddress(hKernel32, "LoadLibraryW");
-        if (!loadLibAddr) {
-            result = {false, "GetProcAddress(LoadLibraryW) failed", GetLastError()};
-            break;
+        // Get LoadLibraryW address. Our own copy only matches a target that
+        // runs as the same architecture as this process.
+        LPVOID loadLibAddr = nullptr;
+        const USHORT targetMachine = getProcessMachine(hProcess);
+        if (targetMachine != 0 && targetMachine != currentProcessMachine()) {
+            loadLibAddr = reinterpret_cast<LPVOID>(findRemoteLoadLibraryW(hProcess));
+            if (!loadLibAddr) {
+                result = {false, "Could not find LoadLibraryW in the target process (machine 0x"
+                    + toHex(targetMachine) + ")", 0};
+                break;
+            }
+        } else {
+            HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
+            if (!hKernel32) {
+                result = {false, "GetModuleHandle(kernel32.dll) failed", GetLastError()};
+                break;
+            }
+            loadLibAddr = reinterpret_cast<LPVOID>(GetProcAddress(hKernel32, "LoadLibraryW"));
+            if (!loadLibAddr) {
+                result = {false, "GetProcAddress(LoadLibraryW) failed", GetLastError()};
+                break;
+            }
         }
 
         // Create remote thread
@@ -2212,13 +2350,12 @@ static bool isInjectableDllResourceName(const std::string& fileName) {
  * Support resources such as Vulkan layer manifests are written beside the
  * selected Toolscreen.dll, but only DLL paths are returned for injection.
  */
-static std::vector<fs::path> copyDllsToPersistentDir() {
+static std::vector<fs::path> copyDllsToPersistentDir(const std::string& payloadArch) {
     std::vector<fs::path> injectableDlls;
     fs::path destDir = getPreferredPersistentDllDir();
     fs::create_directories(destDir);
 
     auto bundled = getEmbeddedDllEntries();
-    const std::string payloadArch = toUtf8(PAYLOAD_ARCH);
     const bool hasMatchingArchitectureSpecificToolscreen = std::any_of(
         bundled.begin(), bundled.end(), [&payloadArch](const EmbeddedDllEntry& entry) {
             return toLower(entry.fileName) == "toolscreen_" + payloadArch + ".dll";
@@ -2567,29 +2704,6 @@ static int runWatcherMode() {
     logMsg("[" + g_projectName + "] Target instance directories:");
     for (auto& d : targetDirs) logMsg("[" + g_projectName + "]   - " + toUtf8(d));
 
-    // Copy DLLs to persistent directory
-    fs::path persistentDllDir = getPreferredPersistentDllDir();
-    logMsg("[" + g_projectName + "] Copying DLLs to: " + persistentDllDir.string());
-    auto dlls = copyDllsToPersistentDir();
-    if (dlls.empty()) {
-        logMsg("[" + g_projectName + "] No DLLs found - exiting");
-        closeLogging();
-        return 1;
-    }
-
-    logMsg("[" + g_projectName + "] Found " + std::to_string(dlls.size()) + " DLL(s):");
-    for (auto& dll : dlls) logMsg("[" + g_projectName + "]   - " + dll.filename().string());
-
-    // Separate logger DLL
-    fs::path loggerDll;
-    std::vector<fs::path> otherDlls;
-    for (auto& dll : dlls) {
-        if (iequalsW(dll.filename().wstring(), LOGGER_DLL_NAME))
-            loggerDll = dll;
-        else
-            otherDlls.push_back(dll);
-    }
-
     DWORD ourPid = GetCurrentProcessId();
     DWORD ourParentPid = ProcessUtils::getParentProcessId(ourPid);
     logMsg("[" + g_projectName + "] Our PID: " + std::to_string(ourPid));
@@ -2666,6 +2780,35 @@ static int runWatcherMode() {
             return 1;
         }
         Sleep(POLL_INTERVAL_MS);
+    }
+
+    // Pick the DLLs for the architecture the JVM runs as, which is not
+    // always this installer's own architecture on ARM64 Windows.
+    const std::string payloadArch = DllInjector::getPayloadArchitecture(javaProcessId);
+    const std::wstring loggerDllName = L"liblogger_" + toWide(payloadArch) + L".dll";
+    logMsg("[" + g_projectName + "] Target process runs as " + payloadArch);
+
+    // Copy DLLs to persistent directory
+    fs::path persistentDllDir = getPreferredPersistentDllDir();
+    logMsg("[" + g_projectName + "] Copying DLLs to: " + persistentDllDir.string());
+    auto dlls = copyDllsToPersistentDir(payloadArch);
+    if (dlls.empty()) {
+        logMsg("[" + g_projectName + "] No DLLs found - exiting");
+        closeLogging();
+        return 1;
+    }
+
+    logMsg("[" + g_projectName + "] Found " + std::to_string(dlls.size()) + " DLL(s):");
+    for (auto& dll : dlls) logMsg("[" + g_projectName + "]   - " + dll.filename().string());
+
+    // Separate logger DLL
+    fs::path loggerDll;
+    std::vector<fs::path> otherDlls;
+    for (auto& dll : dlls) {
+        if (iequalsW(dll.filename().wstring(), loggerDllName))
+            loggerDll = dll;
+        else
+            otherDlls.push_back(dll);
     }
 
     // Inject DLLs
