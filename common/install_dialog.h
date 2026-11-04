@@ -35,6 +35,8 @@ static void showInstallSuccessDialogWithUninstall(const fs::path &instanceCfg, c
             uninstallResult = uninstall();
         } else if (iequals(toLower(instanceCfg.extension().string()), ".json")) {
             uninstallResult = InstanceConfig::installPreLaunchCommandJson(instanceCfg, "");
+        } else if (iequals(toLower(instanceCfg.extension().string()), ".toml")) {
+            uninstallResult = InstanceConfig::installPreLaunchCommandToml(instanceCfg, "");
         } else {
             uninstallResult = InstanceConfig::installPreLaunchCommandCfg(instanceCfg, "");
         }

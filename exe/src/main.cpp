@@ -53,6 +53,7 @@
 #include "../../common/prelaunch.h"
 #include "../../common/launcher_support.h"
 #include "../../common/instance_json.h"
+#include "../../common/instance_toml.h"
 #include "../../common/config_file.h"
 #include "../../common/process_capture.h"
 
@@ -2896,6 +2897,28 @@ static InstallResult installPreLaunchCommandJson(const fs::path& jsonFile, const
     }
 }
 
+static InstallResult installPreLaunchCommandToml(const fs::path& tomlFile, const std::string& command) {
+    try {
+        std::ifstream fin(tomlFile, std::ios::binary);
+        if (!fin) return {false, "Cannot read " + tomlFile.u8string()};
+        std::vector<std::string> lines;
+        std::string line;
+        while (std::getline(fin, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            lines.push_back(line);
+        }
+        if (fin.bad()) return {false, "Cannot read " + tomlFile.u8string()};
+        fin.close();
+        std::string resolved;
+        if (!command.empty() && !resolveCommand(InstanceToml::preLaunchCommand(lines), command, resolved))
+            return {false, "Installation cancelled; existing command preserved."};
+        ConfigFile::writeLines(tomlFile, InstanceToml::update(lines, resolved));
+        return {true, ""};
+    } catch (const std::exception& e) {
+        return {false, e.what()};
+    }
+}
+
 /**
  * Kill launcher processes (Prism/MultiMC) before modifying config.
  */
@@ -3483,6 +3506,28 @@ static int runInstallMode() {
     std::string prelaunchCmd = InstanceConfig::buildPreLaunchCommand(exeRelPath);
     std::string prelaunchCmdAtLauncher = InstanceConfig::buildPreLaunchCommand(exeRelPath, false);
 
+    // Waymark runs this from the game folder through cmd, so the command is stored as typed.
+    if (auto toml = InstanceToml::waymarkFile(exeDir); !toml.empty()) {
+        auto result = InstanceConfig::installPreLaunchCommandToml(
+            toml, "\"$INST_MC_DIR/" + toUtf8(exeFilename) + "\" --prelaunch");
+        if (result.success) {
+            InstanceConfig::ensurePrelaunchTxtExists(exeDir);
+            showInstallSuccessDialogWithUninstall(toml, toml.parent_path());
+        } else {
+            Ui::showDialog(
+                toWide(g_projectName + " — Error"),
+                toWide("Installation failed:\n" + result.error),
+                Ui::DialogTone::Error,
+                {{IDOK, L"Exit", true}},
+                IDOK,
+                true,
+                L"Installation Failed",
+                760
+            );
+        }
+        return result.success ? 0 : 1;
+    }
+
     if (auto result = installModrinth(instanceDir, stableExe)) return *result;
 
     // Look for instance.cfg (MultiMC/Prism) or instance.json (ATLauncher)
@@ -3539,7 +3584,8 @@ static int runInstallMode() {
                    "   - MultiMC: Right-click instance > Instance Folder\n"
                    "   - Prism: Right-click instance > Folder\n"
                    "   - ATLauncher: Right-click instance > Open Folder\n"
-                   "   - Modrinth: Instance options > Open folder\n\n"
+                   "   - Modrinth: Instance options > Open folder\n"
+                   "   - Waymark: Right-click instance > Open folder\n\n"
                    "2. Drop this EXE into that folder.\n\n"
                    "3. Double-click this EXE in that folder to install."),
             Ui::DialogTone::Info,

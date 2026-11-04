@@ -273,6 +273,20 @@ public class Main {
         String prelaunchCommand = "\\\"$INST_JAVA\\\" -jar \\\"$INST_DIR/" + jarRelativePath + "\\\"";
         String prelaunchCommandAtLauncher = "\"$INST_JAVA\" -jar \"$INST_DIR/" + jarRelativePath + "\"";
 
+        File waymarkToml = InstanceToml.waymarkFile(jarDir);
+        if (waymarkToml != null) {
+            // Waymark runs this from the game folder through cmd, so the command is stored as typed.
+            String waymarkCommand = "\"$INST_JAVA\" -jar \"$INST_MC_DIR/" + jarFilename + "\" " + PRELAUNCH_ARG;
+            InstallResult result = installPreLaunchCommandToml(waymarkToml, waymarkCommand);
+            if (result.success) {
+                ensurePrelaunchTxtExists(jarDir);
+                showSuccessDialog(jarFilename, waymarkToml, waymarkToml.getParentFile());
+            } else {
+                showErrorDialog(result.error);
+            }
+            return result.success ? 0 : 1;
+        }
+
         ModrinthDetection modrinthDetection = detectModrinthInstance(stableJarForLauncher.getParentFile());
         if (modrinthDetection.error != null) {
             // Same as the native installer: a database we could not read means we cannot tell whether this
@@ -2940,6 +2954,27 @@ public class Main {
     }
 
     /**
+     * Install the pre-launch command into Waymark's instance.toml. The shared merge reads and
+     * writes Prism's escaped form, so the command passes through it escaped and is stored as typed.
+     */
+    private static InstallResult installPreLaunchCommandToml(File instanceToml, String command) {
+        try {
+            List<String> lines = Files.readAllLines(instanceToml.toPath(), StandardCharsets.UTF_8);
+            String merged = "";
+            if (command != null && !command.trim().isEmpty()) {
+                MergeResult mergeResult = mergePreLaunchCommand(
+                    InstanceToml.toIni(InstanceToml.preLaunchCommand(lines)), InstanceToml.toIni(command));
+                if (!mergeResult.proceed) return new InstallResult(false, "Installation cancelled by user.");
+                merged = InstanceToml.fromIni(mergeResult.mergedCommand);
+            }
+            ConfigFile.writeLines(instanceToml.toPath(), InstanceToml.update(lines, merged));
+            return new InstallResult(true, null);
+        } catch (Exception e) {
+            return new InstallResult(false, e.getMessage());
+        }
+    }
+
+    /**
      * Merge an existing pre-launch command with the new EasyInject command.
      */
     private static MergeResult mergePreLaunchCommand(String existingCommand, String newCommand) {
@@ -3689,6 +3724,9 @@ public class Main {
     }
 
     private static InstallResult uninstallStandard(File instanceCfg) {
+        if (instanceCfg.getName().toLowerCase().endsWith(".toml")) {
+            return installPreLaunchCommandToml(instanceCfg, "");
+        }
         if (instanceCfg.getName().toLowerCase().endsWith(".json")) {
             return installPreLaunchCommandJson(instanceCfg, "");
         }
@@ -4044,6 +4082,7 @@ public class Main {
                 "<li><b style='color:#42A5F5;'>Prism:</b> Right-click instance → Folder</li>" +
                 "<li><b style='color:#00BCD4;'>Modrinth App:</b> Click the ⋮ button on the instance → Open folder</li>" +
                 "<li><b style='color:#FF7043;'>ATLauncher:</b> Right-click instance → Open Folder</li>" +
+                "<li><b style='color:#E8A33D;'>Waymark:</b> Right-click instance → Open folder</li>" +
                 "<li><b style='color:#9575CD;'>Other launchers:</b> Not currently supported</li>" +
                 "</ul>" +
                 "</li>" +
@@ -4086,7 +4125,8 @@ public class Main {
                 "   - MultiMC: Right-click instance -> Instance Folder\n" +
                 "   - Prism: Right-click instance -> Folder\n" +
                 "   - Modrinth App: Click the ⋮ button on the instance -> Open folder\n" +
-                "   - ATLauncher: Right-click instance -> Open Folder\n\n" +
+                "   - ATLauncher: Right-click instance -> Open Folder\n" +
+                "   - Waymark: Right-click instance -> Open folder\n\n" +
                 "2. Drop this JAR file into that folder.\n\n" +
                 "3. Double-click this JAR file in that folder to install.\n\n";
             System.out.println(consoleMsg);
