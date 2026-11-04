@@ -123,3 +123,9 @@ $INST_JAVA -jar EasyInjectBundled-1.0.jar
 ```
 
 For Modrinth, place an installer in the instance profile folder and double-click it. The installer writes the pre-launch hook into that profile's `app.db`.
+
+For Waymark, right-click the instance, choose **Open folder**, place an installer in that `game` folder and double-click it. The installer writes the pre-launch hook into the top-level `preLaunch` key of the instance's `instance.toml`, one folder up. Waymark runs it from the `game` folder through `cmd` with the same `INST_*` variables as Prism. To set it up by hand, use this as the instance's pre-launch command:
+
+```text
+"$INST_JAVA" -jar "$INST_MC_DIR/Toolscreen.jar" --prelaunch
+```
